@@ -1,27 +1,34 @@
-"""The agent: scanner + tool registry + decision cycle."""
+"""The agent: dynamic universe + tool registry + decision cycle."""
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Callable
 
+from ..config import ALLOW_MOCK_MARKET
 from ..services.openrouter import ToolRegistry, chat_with_tools, extract_json
 from ..tools import memory as mem
 from ..tools import risk as risk_mod
-from ..tools.binance_mcp import BinanceMCP, get_market_data
-from ..tools.indicators import calculate_indicators
-from ..tools.signals import score_candidate
-from ..tools.volume import momentum, volatility, volume_anomaly
+from ..tools.baw_cli import BawClient
+from ..tools.market_data import sync_get_klines
+from ..tools.universe import (
+    discover_bstocks, quick_scan, get_klines,
+    rsi, ema, macd, atr, volume_anomaly, market_structure,
+    bollinger_bands, stochastic, adx, all_indicators,
+    baw_format, binance_format,
+)
 from ..trace import Trace
 from .monitor import WatchList
 from .prompts import DECISION_USER_TEMPLATE, REANALYSIS_USER_TEMPLATE, SYSTEM
 
-# bStocks universe for the MVP demo. Kept small on purpose.
-UNIVERSE = ["NVDAUSDT", "TSLAUSDT", "AAPLUSDT", "AMZNUSDT", "MSFTUSDT", "METAUSDT"]
-
 
 class Agent:
     def __init__(self, on_event: Callable[[dict], None] | None = None):
-        self.mcp = BinanceMCP()
+        # baw client is optional in mock mode
+        try:
+            self.baw = BawClient()
+        except FileNotFoundError:
+            self.baw = None
         self.on_event = on_event
         self._candle_cache: dict[str, list[dict]] = {}
         self.watchlist = WatchList()
@@ -30,11 +37,17 @@ class Agent:
 
     # ---- data access -------------------------------------------------
     def _candles(self, symbol: str, interval: str = "1h", limit: int = 120) -> list[dict]:
-        key = f"{symbol}:{interval}"
+        """Get candles from Binance REST (production) or mock (dev)."""
+        key = f"{symbol}:{interval}:{limit}"
         if key not in self._candle_cache:
-            data = get_market_data(symbol, interval, limit, mcp=self.mcp)
-            self._candle_cache[key] = data["candles"]
-            self._last_source = data["source"]
+            if ALLOW_MOCK_MARKET:
+                from ..tools.binance_mcp import _mock_candles
+                self._candle_cache[key] = _mock_candles(symbol, limit)
+                self._last_source = "mock"
+            else:
+                # Fetch real data from Binance REST API
+                self._candle_cache[key] = sync_get_klines(symbol, interval, limit)
+                self._last_source = "binance_rest"
         return self._candle_cache[key]
 
     def invalidate(self) -> None:
@@ -43,59 +56,93 @@ class Agent:
     def snapshot(self, symbol: str) -> dict:
         """Cheap current-state read used by the monitor (no LLM involved)."""
         c = self._candles(symbol)
-        ind = calculate_indicators(c)
+        ind = all_indicators(c)
         return {
             "symbol": symbol,
-            "price": ind["price"],
+            "price": c[-1]["close"],
             "rsi": ind["rsi"],
-            "volume_ratio": volume_anomaly(c).get("ratio"),
+            "volume_ratio": ind["volume"].get("ratio"),
         }
-
-    # ---- scanner -----------------------------------------------------
-    def scan(self, trace: Trace, top_n: int = 4) -> list[dict]:
-        """Deterministic prefilter: score the whole universe in Python, keep the best."""
-        trace.add("scan_start", universe=UNIVERSE)
-        scored = []
-        for sym in UNIVERSE:
-            try:
-                scored.append(score_candidate(sym, self._candles(sym)))
-            except Exception as exc:  # noqa: BLE001
-                trace.add("scan_error", symbol=sym, error=str(exc)[:200])
-        scored.sort(key=lambda s: s["signal_score"], reverse=True)
-        top = scored[:top_n]
-        trace.add("scan_result", ranked=[
-            {"symbol": s["symbol"], "score": s["signal_score"], "label": s["label"]}
-            for s in scored
-        ])
-        return top
 
     # ---- tools exposed to the LLM ------------------------------------
     def build_registry(self, trace: Trace) -> ToolRegistry:
         reg = ToolRegistry()
 
-        def t_market(symbol: str, interval: str = "1h"):
-            c = self._candles(symbol, interval)
-            return {"symbol": symbol, "interval": interval, "last_price": c[-1]["close"],
-                    "candles_available": len(c),
-                    "recent_closes": [x["close"] for x in c[-12:]]}
+        # Universe discovery & quick scan
+        def t_discover_universe():
+            try:
+                symbols = discover_bstocks()
+                return {"symbols": symbols, "count": len(symbols)}
+            except Exception as e:
+                return {"error": str(e), "symbols": []}
 
-        def t_indicators(symbol: str):
-            return calculate_indicators(self._candles(symbol))
+        def t_quick_scan(min_volume_usd: float = 50000, max_symbols: int = 20):
+            try:
+                return {"candidates": quick_scan(min_volume_usd, max_symbols)}
+            except Exception as e:
+                return {"error": str(e), "candidates": []}
 
-        def t_flow(symbol: str):
+        # Individual indicators (LLM chooses what it needs)
+        def t_get_rsi(symbol: str, period: int = 14):
             c = self._candles(symbol)
-            return {"volume_anomaly": volume_anomaly(c), "volatility": volatility(c),
-                    "momentum": momentum(c)}
+            return {"symbol": symbol, "rsi": rsi(c, period), "period": period}
 
-        def t_score(symbol: str):
-            s = score_candidate(symbol, self._candles(symbol))
-            return {k: s[k] for k in ("symbol", "signal_score", "label", "components",
-                                      "range_position_pct")}
+        def t_get_ema(symbol: str, period: int = 20):
+            c = self._candles(symbol)
+            return {"symbol": symbol, "ema": ema(c, period), "period": period}
 
+        def t_get_macd(symbol: str):
+            c = self._candles(symbol)
+            return {"symbol": symbol, **macd(c)}
+
+        def t_get_atr(symbol: str, period: int = 14):
+            c = self._candles(symbol)
+            return {"symbol": symbol, "atr": atr(c, period), "period": period}
+
+        def t_get_volume(symbol: str, lookback: int = 20):
+            c = self._candles(symbol)
+            return {"symbol": symbol, **volume_anomaly(c, lookback)}
+
+        def t_get_structure(symbol: str, lookback: int = 50):
+            c = self._candles(symbol)
+            return {"symbol": symbol, **market_structure(c, lookback)}
+
+        def t_get_bollinger(symbol: str, period: int = 20):
+            c = self._candles(symbol)
+            return {"symbol": symbol, **bollinger_bands(c, period)}
+
+        def t_get_stochastic(symbol: str, period: int = 14):
+            c = self._candles(symbol)
+            return {"symbol": symbol, **stochastic(c, period)}
+
+        def t_get_adx(symbol: str, period: int = 14):
+            c = self._candles(symbol)
+            return {"symbol": symbol, "adx": adx(c, period), "period": period}
+
+        def t_get_all_indicators(symbol: str):
+            c = self._candles(symbol)
+            return {"symbol": symbol, **all_indicators(c)}
+
+        # Memory & risk (unchanged)
         def t_get_memory(symbol: str):
             c = self._candles(symbol)
-            ind = calculate_indicators(c)
-            fp = mem.fingerprint(ind, volume_anomaly(c), momentum(c))
+            ind = all_indicators(c)
+            # Reconstruct fingerprint from individual indicators
+            fp_parts = []
+            if ind["rsi"] > 70: fp_parts.append("rsi:overbought")
+            elif ind["rsi"] < 30: fp_parts.append("rsi:oversold")
+            else: fp_parts.append("rsi:neutral")
+            if ind["volume"]["verdict"] == "high": fp_parts.append("vol:spike")
+            elif ind["volume"]["verdict"] == "low": fp_parts.append("vol:dry")
+            else: fp_parts.append("vol:normal")
+            mom = ind["structure"]["trend"]
+            if mom == "bullish" and ind.get("macd", {}).get("macd", 0) > 0:
+                fp_parts.append("mom:strong_up")
+            elif mom == "bearish":
+                fp_parts.append("mom:down")
+            else:
+                fp_parts.append("mom:flat")
+            fp = "|".join(fp_parts)
             return {"fingerprint": fp,
                     "similar_past_setups": mem.search_memory(symbol, fp),
                     "historical_stats": mem.outcome_stats(fp)}
@@ -106,27 +153,65 @@ class Agent:
                 "realized_pnl_today": risk_mod.STATE.realized_pnl_today,
             }
 
-        reg.register("get_market_data",
-                     "Live bStocks price data via Binance Agent OS (MCP).",
+        # Register all tools
+        reg.register("discover_universe",
+                     "Discover all tradeable bStock symbols on Binance (ending in BUSDT).",
+                     {"type": "object", "properties": {}}, t_discover_universe)
+
+        reg.register("quick_scan",
+                     "Quick volume-filtered scan of bStocks universe. Returns top candidates with price, change%, volume.",
                      {"type": "object", "properties": {
-                         "symbol": {"type": "string"},
-                         "interval": {"type": "string", "enum": ["15m", "1h", "4h", "1d"]}},
-                      "required": ["symbol"]}, t_market)
+                         "min_volume_usd": {"type": "number", "default": 50000},
+                         "max_symbols": {"type": "integer", "default": 20}},
+                      "required": []}, t_quick_scan)
 
-        reg.register("calculate_indicators",
-                     "RSI, EMA20/50, MACD, ATR computed in Python from live candles.",
-                     {"type": "object", "properties": {"symbol": {"type": "string"}},
-                      "required": ["symbol"]}, t_indicators)
+        reg.register("get_rsi", "Relative Strength Index (14).",
+                     {"type": "object", "properties": {
+                         "symbol": {"type": "string"}, "period": {"type": "integer", "default": 14}},
+                      "required": ["symbol"]}, t_get_rsi)
 
-        reg.register("analyze_flow",
-                     "Volume anomaly ratio, volatility regime and momentum.",
-                     {"type": "object", "properties": {"symbol": {"type": "string"}},
-                      "required": ["symbol"]}, t_flow)
+        reg.register("get_ema", "Exponential Moving Average.",
+                     {"type": "object", "properties": {
+                         "symbol": {"type": "string"}, "period": {"type": "integer", "default": 20}},
+                      "required": ["symbol"]}, t_get_ema)
 
-        reg.register("get_signal_score",
-                     "Deterministic 0-100 signal score with component breakdown.",
+        reg.register("get_macd", "MACD (12,26,9).",
                      {"type": "object", "properties": {"symbol": {"type": "string"}},
-                      "required": ["symbol"]}, t_score)
+                      "required": ["symbol"]}, t_get_macd)
+
+        reg.register("get_atr", "Average True Range (14).",
+                     {"type": "object", "properties": {
+                         "symbol": {"type": "string"}, "period": {"type": "integer", "default": 14}},
+                      "required": ["symbol"]}, t_get_atr)
+
+        reg.register("get_volume", "Volume anomaly ratio vs baseline.",
+                     {"type": "object", "properties": {
+                         "symbol": {"type": "string"}, "lookback": {"type": "integer", "default": 20}},
+                      "required": ["symbol"]}, t_get_volume)
+
+        reg.register("get_structure", "Market structure: HH/LL, range position %, trend.",
+                     {"type": "object", "properties": {
+                         "symbol": {"type": "string"}, "lookback": {"type": "integer", "default": 50}},
+                      "required": ["symbol"]}, t_get_structure)
+
+        reg.register("get_bollinger", "Bollinger Bands %B.",
+                     {"type": "object", "properties": {
+                         "symbol": {"type": "string"}, "period": {"type": "integer", "default": 20}},
+                      "required": ["symbol"]}, t_get_bollinger)
+
+        reg.register("get_stochastic", "Stochastic %K/%D.",
+                     {"type": "object", "properties": {
+                         "symbol": {"type": "string"}, "period": {"type": "integer", "default": 14}},
+                      "required": ["symbol"]}, t_get_stochastic)
+
+        reg.register("get_adx", "Average Directional Index (trend strength).",
+                     {"type": "object", "properties": {
+                         "symbol": {"type": "string"}, "period": {"type": "integer", "default": 14}},
+                      "required": ["symbol"]}, t_get_adx)
+
+        reg.register("get_all_indicators", "All indicators at once (convenience).",
+                     {"type": "object", "properties": {"symbol": {"type": "string"}},
+                      "required": ["symbol"]}, t_get_all_indicators)
 
         reg.register("get_memory",
                      "Recall past similar setups for this symbol and their outcomes.",
@@ -144,32 +229,17 @@ class Agent:
         trace = Trace(goal, on_event=self.on_event)
         self.invalidate()
 
-        top = self.scan(trace)
-        if not top:
-            trace.add("abort", reason="no candidates")
-            trace.save()
-            return {"trace": trace, "decision": None}
-
-        candidates_txt = json.dumps([
-            {"symbol": s["symbol"], "signal_score": s["signal_score"],
-             "label": s["label"], "components": s["components"],
-             "price": s["indicators"]["price"], "rsi": s["indicators"]["rsi"],
-             "trend": s["indicators"]["ema_cross"],
-             "volume_ratio": s["volume_anomaly"]["ratio"],
-             "volatility": s["volatility"]["verdict"]}
-            for s in top
-        ], indent=2)
-
+        # No pre-scan — LLM will call discover_universe / quick_scan as needed
         messages = [
             {"role": "system", "content": SYSTEM},
             {"role": "user", "content": DECISION_USER_TEMPLATE.format(
                 goal=goal,
                 limits=json.dumps(risk_mod.limits(), indent=2),
-                candidates=candidates_txt,
+                candidates="[LLM will scan universe via tools]",
             )},
         ]
 
-        return self._run_decision(messages, trace, scores=top)
+        return self._run_decision(messages, trace, scores=None)
 
     # ---- shared decision runner --------------------------------------
     def _run_decision(self, messages: list[dict], trace: Trace,
@@ -204,14 +274,24 @@ class Agent:
         if sym:
             try:
                 c = self._candles(sym)
-                ind = calculate_indicators(c)
-                fp = mem.fingerprint(ind, volume_anomaly(c), momentum(c))
-                score = None
-                if scores:
-                    score = next((s["signal_score"] for s in scores
-                                  if s["symbol"] == sym), None)
-                if score is None:
-                    score = score_candidate(sym, c)["signal_score"]
+                ind = all_indicators(c)
+                # Build fingerprint from individual indicators
+                fp_parts = []
+                if ind["rsi"] > 70: fp_parts.append("rsi:overbought")
+                elif ind["rsi"] < 30: fp_parts.append("rsi:oversold")
+                else: fp_parts.append("rsi:neutral")
+                if ind["volume"]["verdict"] == "high": fp_parts.append("vol:spike")
+                elif ind["volume"]["verdict"] == "low": fp_parts.append("vol:dry")
+                else: fp_parts.append("vol:normal")
+                mom = ind["structure"]["trend"]
+                if mom == "bullish" and ind.get("macd", {}).get("macd", 0) > 0:
+                    fp_parts.append("mom:strong_up")
+                elif mom == "bearish":
+                    fp_parts.append("mom:down")
+                else:
+                    fp_parts.append("mom:flat")
+                fp = "|".join(fp_parts)
+                score = None  # no pre-scan score available
                 mem_id = mem.save_memory(sym, fp, score, ind, decision)
                 trace.add("memory_saved", memory_id=mem_id, fingerprint=fp)
             except Exception as exc:  # noqa: BLE001
@@ -276,7 +356,7 @@ class Agent:
 
     # ---- trade execution (gated) -------------------------------------
     def confirm_trade(self) -> dict:
-        """User-confirmed execution path: risk re-check -> MCP order -> verify."""
+        """User-confirmed execution path: risk re-check -> baw order -> verify."""
         if not self.pending_trade:
             return {"error": "no pending trade"}
 
@@ -292,20 +372,53 @@ class Agent:
             trace.save()
             return {"executed": False, "reason": verdict["reason"], "trace": trace}
 
-        order = {"symbol": pt["symbol"], "side": "BUY", "type": "MARKET",
-                 "quoteOrderQty": pt["size_usd"]}
-        trace.tool_call("binance_place_order", order)
-        try:
-            tool = (self.mcp.find_tool("order", "place") or self.mcp.find_tool("order")
-                    or self.mcp.find_tool("trade"))
-            if not tool:
-                raise RuntimeError("no order tool exposed by Agent OS")
-            result = self.mcp.call(tool, order)
+        # Execute via baw CLI (or simulate in mock mode)
+        trace.tool_call("baw_spot_order", {
+            "symbol": pt["symbol"], 
+            "side": "BUY", 
+            "type": "MARKET", 
+            "quote_qty": pt["size_usd"]
+        })
+        
+        if self.baw is None:
+            # Mock execution for development
+            import uuid
+            result_dict = {
+                "success": True,
+                "order_id": f"mock_{uuid.uuid4().hex[:12]}",
+                "tx_hash": f"0x{uuid.uuid4().hex}",
+                "status": "FILLED",
+                "filled_qty": pt["size_usd"] / pt["entry_price"],
+                "avg_price": pt["entry_price"],
+                "fees_usd": round(pt["size_usd"] * 0.0004, 4),
+                "error": None,
+                "mock": True,
+            }
             executed = True
-        except Exception as exc:  # noqa: BLE001
-            result = {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
-            executed = False
-        trace.tool_result("binance_place_order", result)
+        else:
+            try:
+                result = asyncio.run(self.baw.place_spot_order(
+                    side="BUY",
+                    symbol=pt["symbol"],
+                    quote_qty=pt["size_usd"],
+                    order_type="MARKET",
+                ))
+                executed = result.success
+                result_dict = {
+                    "success": result.success,
+                    "order_id": result.order_id,
+                    "tx_hash": result.tx_hash,
+                    "status": result.status,
+                    "filled_qty": result.filled_qty,
+                    "avg_price": result.avg_price,
+                    "fees_usd": result.fees_usd,
+                    "error": result.error,
+                }
+            except Exception as exc:  # noqa: BLE001
+                result_dict = {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+                executed = False
+        
+        trace.tool_result("baw_spot_order", result_dict)
 
         if executed:
             risk_mod.STATE.record_trade(pt["symbol"], pt["size_usd"])
@@ -314,7 +427,7 @@ class Agent:
 
         self.pending_trade = None
         trace.save()
-        return {"executed": executed, "order": order, "result": result,
+        return {"executed": executed, "order": {"symbol": pt["symbol"], "side": "BUY", "type": "MARKET", "quoteOrderQty": pt["size_usd"]}, "result": result_dict,
                 "trace": trace, "risk": verdict}
 
     def close_position(self, symbol: str, exit_price: float,

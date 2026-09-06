@@ -10,10 +10,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .agent.loop import AgentLoop
-from .config import ALLOW_MOCK_MARKET, OPENROUTER_MODEL, TRACE_DIR
-from .services import binance_oauth as oauth
+from .config import ALLOW_MOCK_MARKET, OPENROUTER_MODEL, TRACE_DIR, BAW_PATH
 from .services import openrouter as llm
 from .tools import risk as risk_mod
+from .tools.baw_cli import BawClient
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 
@@ -66,6 +66,13 @@ hub = Hub()
 agent_loop = AgentLoop(DEFAULT_GOAL, on_event=hub.publish,
                        monitor_interval_s=15.0, rescan_interval_s=300.0)
 
+# baw client for status checks (optional - may not be installed)
+_baw_client = None
+try:
+    _baw_client = BawClient(BAW_PATH)
+except FileNotFoundError:
+    pass
+
 
 @app.on_event("startup")
 async def _startup() -> None:
@@ -75,7 +82,14 @@ async def _startup() -> None:
 # ---- API ----------------------------------------------------------------
 
 @app.get("/api/state")
-def state() -> dict:
+async def state() -> dict:
+    if _baw_client:
+        baw_auth = await _baw_client.check_auth()
+        baw_authenticated = baw_auth.authenticated
+        baw_address = baw_auth.address
+    else:
+        baw_authenticated = False
+        baw_address = None
     return {
         **agent_loop.state(),
         "risk_limits": risk_mod.limits(),
@@ -85,8 +99,9 @@ def state() -> dict:
             "open_positions": risk_mod.STATE.open_positions,
         },
         "model": llm.active_model(),
-        "data_source": "mock" if ALLOW_MOCK_MARKET else "binance_mcp",
-        "authenticated": bool(oauth.get_access_token()),
+        "data_source": "mock" if ALLOW_MOCK_MARKET else "binance_rest",
+        "baw_authenticated": baw_authenticated,
+        "baw_address": baw_address,
     }
 
 

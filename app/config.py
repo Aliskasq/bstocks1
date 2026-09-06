@@ -31,15 +31,15 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-opus-5")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-BINANCE_MCP_URL = os.environ.get("BINANCE_MCP_URL", "https://agent.binance.com/mcp/agentic")
-BINANCE_MCP_TOKEN = os.environ.get("BINANCE_MCP_TOKEN", "")
+# baw CLI settings
+BAW_PATH = os.environ.get("BAW_PATH", "baw")  # path to baw binary
 
 MAX_POSITION_USD = _num("MAX_POSITION_USD", 50)
 MAX_DAILY_LOSS_USD = _num("MAX_DAILY_LOSS_USD", 10)
 MAX_TRADES_PER_DAY = int(_num("MAX_TRADES_PER_DAY", 3))
 MAX_LEVERAGE = _num("MAX_LEVERAGE", 2)
 
-ALLOW_MOCK_MARKET = os.environ.get("ALLOW_MOCK_MARKET", "0") == "1"
+ALLOW_MOCK_MARKET = os.environ.get("ALLOW_MOCK_MARKET", "1") == "1"  # Default to mock for dev
 
 TRACE_DIR = ROOT / "traces"
 DB_PATH = ROOT / "agent.db"

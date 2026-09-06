@@ -1,0 +1,85 @@
+{
+  "id": "e1ff4be6b06f",
+  "goal": "[execute] MSTRBUSDT",
+  "started_at": 1788709455.8525448,
+  "duration_s": 0.0,
+  "events": [
+    {
+      "t": 0.0,
+      "kind": "risk",
+      "approved": true,
+      "symbol": "MSTRBUSDT",
+      "requested_size_usd": 50.0,
+      "approved_size_usd": 50.0,
+      "checks": [
+        {
+          "check": "max_position",
+          "ok": true,
+          "detail": "requested $50.00 vs limit $50.00"
+        },
+        {
+          "check": "max_leverage",
+          "ok": true,
+          "detail": "requested 1.0x vs limit 2.0x"
+        },
+        {
+          "check": "max_trades_per_day",
+          "ok": true,
+          "detail": "0 trades used of 3"
+        },
+        {
+          "check": "daily_loss_limit",
+          "ok": true,
+          "detail": "realized P&L today $0.00, floor -$10.00"
+        },
+        {
+          "check": "no_pyramiding",
+          "ok": true,
+          "detail": "existing exposure $0.00 + new $50.00 vs $50.00"
+        },
+        {
+          "check": "positive_size",
+          "ok": true,
+          "detail": "size $50.00"
+        }
+      ],
+      "reason": "all risk checks passed",
+      "failed_checks": []
+    },
+    {
+      "t": 0.0,
+      "kind": "tool_call",
+      "tool": "baw_spot_order",
+      "args": {
+        "symbol": "MSTRBUSDT",
+        "side": "BUY",
+        "type": "MARKET",
+        "quote_qty": 50.0
+      }
+    },
+    {
+      "t": 0.0,
+      "kind": "tool_result",
+      "tool": "baw_spot_order",
+      "result": {
+        "success": true,
+        "order_id": "mock_ca171f3472dd",
+        "tx_hash": "0xf1c9862b9cc44e27a2fb3a1f5cedf5c7",
+        "status": "FILLED",
+        "filled_qty": 0.34865072170699396,
+        "avg_price": 143.41,
+        "fees_usd": 0.02,
+        "error": null,
+        "mock": true
+      },
+      "ms": null
+    },
+    {
+      "t": 0.0,
+      "kind": "position_opened",
+      "symbol": "MSTRBUSDT",
+      "size_usd": 50.0,
+      "entry": 143.41
+    }
+  ]
+}
