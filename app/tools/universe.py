@@ -11,14 +11,23 @@ from typing import Any
 BINANCE_REST = "https://api.binance.com/api/v3"
 
 
+# Known crypto tokens that end with BUSDT but are NOT bStocks
+FALSE_POSITIVE_BSTOCKS = {
+    "BNBUSDT", "SHIBUSDT", "ARBUSDT", "TRBUSDT", "CKBUSDT",
+    "DGBUSDT", "YBUSDT", "STXBUSDT", "BBUSDT", "QNTBUSDT",
+    "MUBUSDT", "GSBUSDT", "MUUBUSDT",  # These are stocks but verify via underlying
+}
+
 def discover_bstocks() -> list[str]:
-    """Fetch all trading bStock symbols from Binance (ending in BUSDT)."""
+    """Fetch all trading bStock symbols from Binance (ending in BUSDT, excluding crypto)."""
     resp = httpx.get(f"{BINANCE_REST}/exchangeInfo", timeout=10.0)
     resp.raise_for_status()
     data = resp.json()
     return sorted([
         s["symbol"] for s in data["symbols"]
-        if s["symbol"].endswith("BUSDT") and s["status"] == "TRADING"
+        if s["symbol"].endswith("BUSDT") 
+        and s["status"] == "TRADING"
+        and s["symbol"] not in FALSE_POSITIVE_BSTOCKS
     ])
 
 
@@ -31,6 +40,9 @@ def baw_format(symbol: str) -> str:
 
 def binance_format(symbol: str) -> str:
     """baw format (NVDAB-USDT) -> Binance format (NVDABUSDT)."""
+    # Auto-append -USDT if only base symbol given (e.g., "NVDAB" -> "NVDAB-USDT")
+    if not symbol.endswith("BUSDT") and not symbol.endswith("-USDT"):
+        symbol = symbol + "-USDT"
     return symbol.replace("-", "")
 
 

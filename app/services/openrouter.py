@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 import httpx
 
-from ..config import OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_URL
+from ..config import OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_URL, MOCK_LLM
 from ..trace import Trace
 
 
@@ -105,16 +105,43 @@ class ToolRegistry:
         return self._fns[name](**args)
 
 
-RETRY_STATUS = {429, 500, 502, 503, 520, 524}
+# 403 = model not available for this use case (e.g., agentic harness restriction)
+# Treat as retry to trigger fallback to another model
+RETRY_STATUS = {403, 429, 500, 502, 503, 520, 524}
 
+
+# ---- Mock LLM responses for demo when OpenRouter is rate-limited ----
+
+_MOCK_QUEUE: list[dict] = [
+    {"content": "Let me check AAPLBUSDT more carefully. The RSI at 24 suggests oversold, but the trend is still bearish.", "tool_calls": [{"id": "m1", "type": "function", "function": {"name": "get_all_indicators", "arguments": '{"symbol": "AAPLB"}'}}]},
+    {"content": "AAPLBUSDT is oversold but bearish trend is strong. Setting up a watch condition and waiting for a better entry.", "tool_calls": [{"id": "m2", "type": "function", "function": {"name": "watch_symbol", "arguments": '{"symbol": "AAPLB", "condition": "rsi < 35"}'}}]},
+    {"content": "AAPLB has been added to my watchlist with condition: rsi < 35. I'll monitor and notify you if conditions are met.", "tool_calls": []},
+    {"content": "Let me check the current portfolio and risk status.", "tool_calls": [{"id": "m4", "type": "function", "function": {"name": "get_portfolio", "arguments": '{}'}}]},
+    {"content": "Portfolio check complete — MOCK mode active, no real positions. Agent is monitoring the market and ready to act.", "tool_calls": []},
+    {"content": "Scanning the bStocks universe for new opportunities.", "tool_calls": [{"id": "m6", "type": "function", "function": {"name": "quick_scan", "arguments": '{}'}}]},
+]
+_mock_idx = 0
+
+def _mock_post_chat(payload: dict, trace: Trace) -> dict:
+    """Return canned mock responses simulating the LLM calling tools."""
+    global _mock_idx
+    response = _MOCK_QUEUE[_mock_idx % len(_MOCK_QUEUE)]
+    _mock_idx += 1
+    trace.llm("assistant", response.get("content", ""))
+    result = {
+        "choices": [{"message": {"role": "assistant", "content": response.get("content", ""), "tool_calls": response.get("tool_calls", [])}}],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        "model": OPENROUTER_MODEL,
+    }
+    trace.add("status", status=f"[MOCK] {response.get('content','')[:50]}")
+    return result
+
+# ---- End Mock LLM ----
 
 def _post_chat(payload: dict, trace: Trace, *, attempts: int = 4) -> dict:
-    """POST to OpenRouter, retrying on shared-pool 429s.
-
-    Free models sit in a shared upstream pool and return 429 regularly. We back
-    off, then fall back to another free tool-calling model rather than aborting
-    the whole cycle.
-    """
+    """POST to OpenRouter, retrying on shared-pool 429s."""
+    if MOCK_LLM:
+        return _mock_post_chat(payload, trace)
     model = payload["model"]
     tried: list[str] = []
     delay = 3.0
@@ -131,7 +158,12 @@ def _post_chat(payload: dict, trace: Trace, *, attempts: int = 4) -> dict:
                 json=payload,
             )
         if resp.status_code < 400:
-            return resp.json()
+            data = resp.json()
+            # Validate response has choices
+            if "choices" not in data or not data["choices"]:
+                trace.add("status", status=f"Empty choices from {payload['model']}")
+                raise RuntimeError(f"OpenRouter empty choices: {resp.text[:200]}")
+            return data
         if resp.status_code not in RETRY_STATUS or attempt == attempts - 1:
             raise RuntimeError(
                 f"OpenRouter HTTP {resp.status_code}: {resp.text[:400]}")
@@ -152,7 +184,13 @@ def _post_chat(payload: dict, trace: Trace, *, attempts: int = 4) -> dict:
                                                      tools_only=True)]
             except Exception:  # noqa: BLE001
                 alts = []
-            nxt = next((m for m in alts if m not in tried and m != model), None)
+            # Skip known-broken models
+            broken = {
+                "thinkingmachines/inkling-small:free",
+                "thinkingmachines/inkling:free",
+                "nvidia/nemotron-3.5-lightning:free",
+            }
+            nxt = next((m for m in alts if m not in tried and m != model and m not in broken), None)
             if nxt:
                 payload["model"] = nxt
                 trace.add("status", status=f"falling back to {nxt}")
@@ -224,6 +262,11 @@ def extract_json(text: str) -> dict | None:
         text = text.split("```")[1]
         if text.startswith("json"):
             text = text[4:]
+    
+    # Handle double-brace case: {{\n  "key": ...\n}}
+    if text.startswith("{{"):
+        text = text[1:]
+    
     start = text.find("{")
     if start < 0:
         return None

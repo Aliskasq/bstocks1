@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -14,6 +15,13 @@ from .config import ALLOW_MOCK_MARKET, OPENROUTER_MODEL, TRACE_DIR, BAW_PATH
 from .services import openrouter as llm
 from .tools import risk as risk_mod
 from .tools.baw_cli import BawClient
+from .tools.universe import discover_bstocks
+
+# Cache valid bStocks whitelist at startup
+try:
+    _BSTOCKS_SET = set(discover_bstocks())
+except Exception:
+    _BSTOCKS_SET = set()
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 
@@ -75,7 +83,7 @@ class Hub:
 
 hub = Hub()
 agent_loop = AgentLoop(DEFAULT_GOAL, on_event=hub.publish,
-                       monitor_interval_s=15.0, rescan_interval_s=300.0)
+                       monitor_interval_s=15.0, rescan_interval_s=30.0)
 
 # baw client for status checks (optional - may not be installed)
 _baw_client = None
@@ -92,6 +100,33 @@ async def _startup() -> None:
 
 # ---- API ----------------------------------------------------------------
 
+@app.get("/api/state")
+async def state() -> JSONResponse:
+    if _baw_client:
+        baw_auth = await _baw_client.check_auth()
+        baw_authenticated = baw_auth.authenticated
+        baw_address = baw_auth.address
+    else:
+        baw_authenticated = False
+        baw_address = None
+    data = {
+        **agent_loop.state(),
+        "trading_mode": agent_loop.trading_mode,
+        "risk_limits": risk_mod.limits(),
+        "risk_state": {
+            "trades_today": risk_mod.STATE.trades_today,
+            "realized_pnl_today": risk_mod.STATE.realized_pnl_today,
+            "open_positions": risk_mod.STATE.open_positions,
+        },
+        "model": llm.active_model(),
+        "data_source": "mock" if ALLOW_MOCK_MARKET else "binance_rest",
+        "authenticated": baw_authenticated,  # baw wallet = авторизован
+        "address": baw_address,
+        "movers": await get_movers(),
+    }
+    return JSONResponse(data, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+
+
 async def get_movers():
     """Fetch top 3 gainers and losers from Binance 24h ticker for bStocks."""
     import httpx
@@ -101,14 +136,10 @@ async def get_movers():
             resp.raise_for_status()
             data = resp.json()
         
-        # Filter bStocks (symbols ending with BUSDT, excluding false positives)
-        false_positives = {"BNBUSDT", "SHIBUSDT", "ARBUSDT", "TRBUSDT", "CKBUSDT",
-                          "DGBUSDT", "YBUSDT", "STXBUSDT", "BBUSDT", "QNTBUSDT",
-                          "MUBUSDT", "GSBUSDT", "MUUBUSDT"}
-        
+        # Filter to valid bStocks only (cached whitelist)
         bstocks = [
             d for d in data
-            if d["symbol"].endswith("BUSDT") and d["symbol"] not in false_positives
+            if d["symbol"] in _BSTOCKS_SET
         ]
         
         # Sort by price change percent
@@ -136,44 +167,6 @@ async def get_movers():
 async def movers():
     """Top 3 gainers/losers among bStocks (24h)."""
     return await get_movers()
-
-
-@app.get("/api/state")
-async def state() -> dict:
-    if _baw_client:
-        baw_auth = await _baw_client.check_auth()
-        baw_authenticated = baw_auth.authenticated
-        baw_address = baw_auth.address
-    else:
-        baw_authenticated = False
-        baw_address = None
-    return {
-        **agent_loop.state(),
-        "trading_mode": agent_loop.trading_mode,
-        "risk_limits": risk_mod.limits(),
-        "risk_state": {
-            "trades_today": risk_mod.STATE.trades_today,
-            "realized_pnl_today": risk_mod.STATE.realized_pnl_today,
-            "open_positions": risk_mod.STATE.open_positions,
-        },
-        "model": llm.active_model(),
-        "data_source": "mock" if ALLOW_MOCK_MARKET else "binance_rest",
-        "authenticated": baw_authenticated,
-        "address": baw_address,
-        "movers": await get_movers(),
-    }
-
-
-@app.post("/api/trading_mode")
-def set_trading_mode(payload: dict) -> dict:
-    """Switch trading mode via dashboard button (MOCK/LIVE)."""
-    mode = (payload or {}).get("mode", "").upper()
-    if mode not in ("MOCK", "LIVE"):
-        return {"ok": False, "error": "mode must be MOCK or LIVE"}
-    result = agent_loop.set_trading_mode(mode)
-    hub.publish({"kind": "status", "ts": time.time(),
-                 "status": f"trading mode changed to {mode}"})
-    return {"ok": True, "message": result, "mode": mode}
 
 
 @app.get("/api/models")
@@ -241,6 +234,18 @@ def confirm() -> dict:
     return out
 
 
+@app.post("/api/trading_mode")
+def set_trading_mode(payload: dict) -> dict:
+    """Switch trading mode via dashboard button (MOCK/LIVE)."""
+    mode = (payload or {}).get("mode", "").upper()
+    if mode not in ("MOCK", "LIVE"):
+        return {"ok": False, "error": "mode must be MOCK or LIVE"}
+    result = agent_loop.set_trading_mode(mode)
+    hub.publish({"kind": "status", "ts": time.time(),
+                 "status": f"trading mode changed to {mode}"})
+    return {"ok": True, "message": result, "mode": mode}
+
+
 @app.get("/api/traces")
 def traces() -> dict:
     TRACE_DIR.mkdir(parents=True, exist_ok=True)
@@ -261,9 +266,16 @@ def chat_history() -> dict:
     return {"history": hub.chat_history}
 
 
-@app.get("/api/events")
-def events() -> dict:
-    return {"events": agent_loop.history[-150:]}
+@app.post("/api/chat")
+async def chat_send(payload: dict) -> dict:
+    """Send a chat message via HTTP (WebSocket-free)."""
+    text = payload.get("text", "").strip()
+    if not text:
+        return {"ok": False, "error": "empty text"}
+    hub.publish({"kind": "chat_user", "ts": time.time(), "text": text})
+    response = agent_loop.handle_chat(text, chat_history=hub.chat_history)
+    hub.publish({"kind": "chat_agent", "ts": time.time(), "text": response})
+    return {"ok": True, "response": response}
 
 
 @app.websocket("/ws")
@@ -277,14 +289,10 @@ async def ws(websocket: WebSocket) -> None:
                 if msg.get("kind") == "user_message":
                     text = msg.get("text", "").strip()
                     if text:
-                        # Emit user message to all clients
                         hub.publish({"kind": "chat_user", "ts": time.time(), "text": text})
-                        # Process through agent
-                        response = agent_loop.agent.handle_chat(text)
-                        # Emit agent response
+                        response = agent_loop.handle_chat(text, chat_history=hub.chat_history)
                         hub.publish({"kind": "chat_agent", "ts": time.time(), "text": response})
             except json.JSONDecodeError:
-                # Ignore non-JSON (old ping/pong)
                 pass
     except WebSocketDisconnect:
         hub.unregister(websocket)
@@ -295,8 +303,9 @@ async def ws(websocket: WebSocket) -> None:
 # ---- frontend -----------------------------------------------------------
 
 @app.get("/")
-def index() -> FileResponse:
-    return FileResponse(FRONTEND / "index.html")
+def index() -> Response:
+    html = (FRONTEND / "index.html").read_text()
+    return Response(content=html, media_type="text/html", headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"})
 
 
 if FRONTEND.exists():

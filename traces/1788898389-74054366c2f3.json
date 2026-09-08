@@ -1,0 +1,204 @@
+{
+  "id": "74054366c2f3",
+  "goal": "Find the best bStocks opportunity with moderate risk. Do not trade unless the setup meets all risk criteria.",
+  "started_at": 1788898389.9445095,
+  "duration_s": 15.305,
+  "events": [
+    {
+      "t": 7.015,
+      "kind": "tool_call",
+      "tool": "quick_scan",
+      "args": {
+        "max_symbols": 20,
+        "min_volume_usd": 50000
+      }
+    },
+    {
+      "t": 8.686,
+      "kind": "tool_result",
+      "tool": "quick_scan",
+      "result": {
+        "candidates": [
+          {
+            "symbol": "BN-BUSDT",
+            "last_price": 751.12,
+            "change_pct": 1.53,
+            "volume_usd": 137291078.3999,
+            "high_24h": 761.39,
+            "low_24h": 736.06
+          },
+          {
+            "symbol": "AR-BUSDT",
+            "last_price": 0.169,
+            "change_pct": 0.956,
+            "volume_usd": 33964161.89842,
+            "high_24h": 0.1787,
+            "low_24h": 0.1652
+          },
+          {
+            "symbol": "SNDK-BUSDT",
+            "last_price": 1746.13,
+            "change_pct": -2.154,
+            "volume_usd": 19798775.179346,
+            "high_24h": 1821.21,
+            "low_24h": 1731.34
+          },
+          {
+            "symbol": "CRCL-BUSDT",
+            "last_price": 95.94,
+            "change_pct": -6.052,
+            "volume_usd": 10360711.8659,
+            "high_24h": 102.95,
+            "low_24h": 95.76
+          },
+          {
+            "symbol": "SPCX-BUSDT",
+            "last_price": 153.07,
+            "change_pct": 1.931,
+            "volume_usd": 10127998.45724,
+            "high_24h": 154.76,
+            "low_24h": 145.34
+          },
+          {
+            "symbol": "SNXX-BUSDT",
+            "last_price": 17.46,
+            "change_pct": -4.329,
+            "volume_usd": 8666482.9953,
+            "high_24h": 18.97,
+            "low_24h": 17.21
+          },
+          {
+            "symbol": "SKHY-BUSDT",
+            "last_price": 185.65,
+            "change_pct": 2.315,
+            "volume_usd": 7723527.65162,
+            "high_24h": 189.75,
+            "low_24h": 179.2
+          },
+          {
+            "symbol": "QQQ-BUSDT",
+            "last_price": 718.14,
+            "change_pct": -0.253,
+            "volume_usd": 7242874.79963,
+            "high_24h": 723.56,
+            "low_24h": 716.25
+          },
+          {
+            "symbol": "MU-BUSDT",
+            "last_price": 1003.44,
+            "change_pct": -3.289,
+            "volume_usd": 6871935.762,
+            "high_24h": 1057.09,
+            "low_24h": 998.0
+          },
+          {
+            "symbol": "MSTR-BUSDT",
+            "last_price": 136.87,
+            "change_pct": -3.47,
+            "volume_usd": 6086406.16045,
+            "high_24h": 143.73,
+            "low_24h": 135.56
+          },
+          {
+            "symbol": "SOXL-BUSDT",
+            "last_price": 123.74,
+            "change_pct": -1.949,
+            "volume_usd": 4324768.90062,
+            "high_24h": 127.43,
+            "low_24h": 118.68
+          },
+          {
+            "symbol": "TSLA-BUSDT",
+            "last_price": 367.19,
+            "change_pct": 3.195,
+            "volume_usd": 4015411.75508,
+            "high_24h": 369.87,
+            "low_24h": 352.66
+          },
+          {
+            "symbol": "SHI-BUSDT",
+            "last_price": 5.43e-06,
+            "change_pct": -0.367,
+            "volume_usd": 3881197.76330751,
+            "high_24h": 5.53e-06,
+            "low_24h": 5.34e-06
+          },
+          {
+            "symbol": "INTC-BUSDT",
+            "last_price": 104.28,
+            "change_pct": 5.686,
+            "volume_usd": 3011887.45279,
+            "high_24h": 106.0,
+            "low_24h": 97.1
+          },
+          {
+            "symbol": "MRVL-BUSDT",
+            "last_price": 225.1,
+            "change_pct": 0.223,
+            "volume_usd": 2402978.8695,
+            "high_24h": 231.79,
+            "low_24h": 220.12
+          },
+          {
+            "symbol": "KORU-BUSDT",
+            "last_price": 23.97,
+            "change_pct": -1.963,
+            "volume_usd": 2319533.7993,
+            "high_24h": 25.73,
+            "low_24h": 22.85
+          },
+          {
+            "symbol": "NVDA-BUSDT",
+            "last_price": 225.86,
+            "change_pct": -2.743,
+            "volume_usd": 2230304.02126,
+            "high_24h": 233.75,
+            "low_24h": 225.07
+          },
+          {
+            "symbol": "AVGO-BUSDT",
+            "last_price": 368.45,
+            "change_pct": 1.44,
+            "volume_usd": 1834653.63291,
+            "high_24h": 373.22,
+            "low_24h": 358.4
+          },
+          {
+            "symbol": "HOOD-BUSDT",
+            "last_price": 117.45,
+            "change_pct": -5.799,
+            "volume_usd": 1773888.72784,
+            "high_24h": 126.59,
+            "low_24h": 116.99
+          },
+          {
+            "symbol": "NBIS-BUSDT",
+            "last_price": 244.99,
+            "change_pct": 9.4,
+            "volume_usd": 1607710.08632,
+            "high_24h": 254.51,
+            "low_24h": 220.42
+          }
+        ]
+      },
+      "ms": null
+    },
+    {
+      "t": 14.967,
+      "kind": "llm",
+      "role": "assistant",
+      "content": "{\n  \"symbol\": \"NBIS-BUSDT\"\n}"
+    },
+    {
+      "t": 14.968,
+      "kind": "decision",
+      "symbol": "NBIS-BUSDT"
+    },
+    {
+      "t": 15.305,
+      "kind": "memory_saved",
+      "memory_id": 42,
+      "fingerprint": "rsi:overbought|vol:dry|mom:strong_up"
+    }
+  ]
+}

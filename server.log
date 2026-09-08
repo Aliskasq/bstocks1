@@ -1,0 +1,36 @@
+INFO:     Started server process [15167]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
+INFO:     127.0.0.1:46350 - "GET /api/state HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39040 - "GET /api/state HTTP/1.1" 200 OK
+INFO:     127.0.0.1:45454 - "GET /api/state HTTP/1.1" 200 OK
+INFO:     212.95.129.161:0 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:32848 - "GET /api/state HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53874 - "GET /api/state HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40838 - "GET /api/state HTTP/1.1" 200 OK
+INFO:     212.95.129.161:0 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46132 - "POST /api/start HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58206 - "GET /api/state HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43814 - "GET /api/state HTTP/1.1" 200 OK
+INFO:     212.95.129.161:0 - "GET / HTTP/1.1" 200 OK
+INFO:     212.95.129.161:0 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60852 - "GET /api/state HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51574 - "GET / HTTP/1.1" 200 OK
+INFO:     212.95.129.161:0 - "GET / HTTP/1.1" 200 OK
+INFO:     212.95.129.161:0 - "GET / HTTP/1.1" 200 OK
+INFO:     212.95.129.161:0 - "GET / HTTP/1.1" 200 OK
+INFO:     5.62.145.227:0 - "GET / HTTP/1.1" 200 OK
+INFO:     5.62.145.227:0 - "GET / HTTP/1.1" 200 OK
+INFO:     5.62.145.227:0 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47392 - "GET /api/state HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47396 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:48194 - "GET /api/state HTTP/1.1" 200 OK
+INFO:     216.246.119.113:0 - "GET /api/state HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33202 - "GET /api/state HTTP/1.1" 200 OK
+INFO:     5.62.145.227:0 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:44508 - "HEAD / HTTP/1.1" 405 Method Not Allowed
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [15167]

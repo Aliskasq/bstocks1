@@ -14,6 +14,9 @@ BINANCE_REST = "https://api.binance.com/api/v3"
 # Map baw format (NVDAB-USDT) -> Binance format (NVDABUSDT)
 def baw_to_binance(symbol: str) -> str:
     """Convert baw symbol format to Binance symbol format."""
+    # Auto-append -USDT if only base symbol given (e.g., "NVDAB" -> "NVDAB-USDT")
+    if not symbol.endswith("BUSDT") and not symbol.endswith("-USDT"):
+        symbol = symbol + "-USDT"
     return symbol.replace("-", "").replace("BUSDT", "BUSDT")  # NVDAB-USDT -> NVDABUSDT
 
 def binance_to_baw(symbol: str) -> str:

@@ -9,7 +9,7 @@ from ..config import ALLOW_MOCK_MARKET
 from ..services.openrouter import ToolRegistry, chat_with_tools, extract_json
 from ..tools import memory as mem
 from ..tools import risk as risk_mod
-from ..tools.baw_cli import BawClient
+from ..tools.baw_dex import BawDexClient, BSTOCK_TOKENS, USDT_BSC, BSC_CHAIN_ID
 from ..tools.market_data import sync_get_klines
 from ..tools.universe import (
     discover_bstocks, quick_scan, get_klines,
@@ -23,13 +23,14 @@ from .prompts import DECISION_USER_TEMPLATE, REANALYSIS_USER_TEMPLATE, SYSTEM
 
 
 class Agent:
-    def __init__(self, on_event: Callable[[dict], None] | None = None):
-        # baw client is optional in mock mode
+    def __init__(self, on_event: Callable[[dict], None] | None = None, trading_mode: str = "MOCK"):
+        # DEX client for bStocks trading via baw on BSC (optional in mock mode)
         try:
-            self.baw = BawClient()
-        except FileNotFoundError:
-            self.baw = None
+            self.dex = BawDexClient()
+        except Exception:
+            self.dex = None
         self.on_event = on_event
+        self.trading_mode = trading_mode.upper()
         self._candle_cache: dict[str, list[dict]] = {}
         self.watchlist = WatchList()
         self.last_decision: dict | None = None
@@ -153,6 +154,38 @@ class Agent:
                 "realized_pnl_today": risk_mod.STATE.realized_pnl_today,
             }
 
+        # DEX tools for bStocks on BSC
+        def t_dex_quote(symbol: str, usdt_amount: float):
+            """Get DEX quote for buying bStock with USDT on BSC."""
+            if self.dex is None or symbol not in BSTOCK_TOKENS:
+                return {"error": f"DEX not available or unknown symbol: {symbol}"}
+            try:
+                quote = asyncio.run(self.dex.get_quote(USDT_BSC, BSTOCK_TOKENS[symbol], usdt_amount))
+                if quote:
+                    return {
+                        "symbol": symbol,
+                        "usdt_amount": usdt_amount,
+                        "bstock_amount": quote.to_amount,
+                        "price_usd": usdt_amount / quote.to_amount if quote.to_amount > 0 else 0,
+                        "price_impact_pct": quote.price_impact_pct,
+                    }
+                return {"error": "Quote failed"}
+            except Exception as e:
+                return {"error": str(e)}
+
+        def t_dex_balances():
+            """Check USDT and bStock balances on BSC via baw wallet."""
+            if self.dex is None:
+                return {"error": "DEX not available"}
+            try:
+                usdt = asyncio.run(self.dex.check_usdt_balance())
+                balances = {"USDT": usdt}
+                for sym in BSTOCK_TOKENS:
+                    balances[sym] = asyncio.run(self.dex.check_bstock_balance(sym))
+                return {"balances": balances}
+            except Exception as e:
+                return {"error": str(e)}
+
         # Register all tools
         reg.register("discover_universe",
                      "Discover all tradeable bStock symbols on Binance (ending in BUSDT).",
@@ -221,6 +254,101 @@ class Agent:
         reg.register("get_risk_limits",
                      "Current hard risk limits and today's usage.",
                      {"type": "object", "properties": {}}, t_limits)
+
+        # DEX tools
+        reg.register("get_dex_quote",
+                     "Get DEX swap quote: how much bStock you get for USDT on BSC (PancakeSwap).",
+                     {"type": "object", "properties": {
+                         "symbol": {"type": "string", "enum": list(BSTOCK_TOKENS.keys())},
+                         "usdt_amount": {"type": "number"}},
+                      "required": ["symbol", "usdt_amount"]}, t_dex_quote)
+
+        reg.register("get_dex_balances",
+                     "Check USDT and bStock balances in baw wallet on BSC.",
+                     {"type": "object", "properties": {}}, t_dex_balances)
+
+        # Web search tool (uses DuckDuckGo HTML, no API key needed)
+        def t_web_search(query: str, max_results: int = 5):
+            """Search the web for news, docs, hackathon rules, technical info."""
+            import httpx
+            import urllib.parse
+            import re
+            
+            url = f"https://duckduckgo.com/html/?q={urllib.parse.quote_plus(query)}"
+            headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
+            try:
+                resp = httpx.get(url, headers=headers, timeout=15.0, follow_redirects=True)
+                resp.raise_for_status()
+                html = resp.text
+                
+                # Extract result snippets
+                results = []
+                # Pattern for DuckDuckGo result snippets
+                snippets = re.findall(r'class="result__snippet">(.*?)</a>', html, re.DOTALL)
+                titles = re.findall(r'class="result__title">.*?>([^<]+)</a>', html)
+                urls = re.findall(r'class="result__url">([^<]+)</a>', html)
+                
+                for i in range(min(max_results, len(snippets))):
+                    results.append({
+                        "title": titles[i].strip() if i < len(titles) else "",
+                        "url": urls[i].strip() if i < len(urls) else "",
+                        "snippet": re.sub(r'<[^>]+>', '', snippets[i]).strip()[:300]
+                    })
+                
+                return {"query": query, "results": results, "engine": "duckduckgo"}
+            except Exception as e:
+                return {"error": str(e), "query": query, "results": []}
+
+        reg.register("web_search",
+                     "Search the web for news, documentation, hackathon rules, technical specs, prices. No API key required. Uses DuckDuckGo.",
+                     {"type": "object", "properties": {
+                         "query": {"type": "string"},
+                         "max_results": {"type": "integer", "default": 5}},
+                      "required": ["query"]}, t_web_search)
+
+        # Security tools
+        def t_verify_bstock_security(symbol: str):
+            """Run all security checks on a bStock: contract verification, CoinGecko cross-ref, honeypot simulation."""
+            from ..tools.baw_dex import verify_contract_source, cross_reference_coingecko, simulate_swap, BSTOCK_TOKENS, USDT_BSC
+            import asyncio
+            
+            if symbol not in BSTOCK_TOKENS:
+                return {"error": f"Unknown bStock: {symbol}", "symbol": symbol}
+            
+            token_addr = BSTOCK_TOKENS[symbol]
+            
+            async def run_checks():
+                verify = await verify_contract_source(token_addr)
+                cg = await cross_reference_coingecko(symbol, token_addr)
+                sim = await simulate_swap(USDT_BSC, token_addr, 10.0)  # Test with $10
+                return {"verify": verify, "coingecko": cg, "simulation": sim}
+            
+            result = asyncio.run(run_checks())
+            result["symbol"] = symbol
+            result["all_passed"] = (
+                result["verify"].get("verified", False) and
+                result["coingecko"].get("matches", False) and
+                result["simulation"].get("success", False)
+            )
+            return result
+
+        reg.register("verify_bstock_security",
+                     "Run full security audit on a bStock: BSCScan contract verification, CoinGecko cross-reference, honeypot simulation. Use before trading new symbols.",
+                     {"type": "object", "properties": {
+                         "symbol": {"type": "string", "enum": list(BSTOCK_TOKENS.keys())}},
+                      "required": ["symbol"]}, t_verify_bstock_security)
+
+        def t_confirm_new_symbol(symbol: str):
+            """Mark a bStock symbol as human-confirmed after manual verification."""
+            from ..tools.baw_dex import save_confirmation
+            save_confirmation(symbol, confirmed_by="human")
+            return {"symbol": symbol, "confirmed": True, "message": f"{symbol} marked as confirmed for trading"}
+
+        reg.register("confirm_new_symbol",
+                     "Confirm a new bStock symbol after manual verification (contract address, CoinGecko, etc.). Required before first trade.",
+                     {"type": "object", "properties": {
+                         "symbol": {"type": "string", "enum": list(BSTOCK_TOKENS.keys())}},
+                      "required": ["symbol"]}, t_confirm_new_symbol)
 
         return reg
 
@@ -354,124 +482,6 @@ class Agent:
         self.watchlist.drop(symbol)
         return out
 
-    def handle_chat(self, text: str) -> str:
-        """Process a natural language chat message from the user."""
-        from ..services.openrouter import ToolRegistry, chat_with_tools, extract_json
-        
-        # Build a tool registry for chat (same as decision cycle but without decision logic)
-        trace = Trace(f"[chat] {text}", on_event=self.on_event)
-        self.invalidate()
-        
-        registry = ToolRegistry()
-        
-        # Chat-specific tools
-        def t_analyze_symbol(symbol: str):
-            """Analyze a bStock symbol with all indicators."""
-            c = self._candles(symbol)
-            ind = all_indicators(c)
-            return {"symbol": symbol, "price": c[-1]["close"], **ind}
-        
-        def t_get_portfolio():
-            """Get current portfolio status."""
-            return {
-                "trading_mode": self.trading_mode if hasattr(self, 'trading_mode') else "MOCK",
-                "trades_today": risk_mod.STATE.trades_today,
-                "realized_pnl_today": risk_mod.STATE.realized_pnl_today,
-                "open_positions": risk_mod.STATE.open_positions,
-            }
-        
-        def t_change_goal(new_goal: str):
-            """Update the agent's goal."""
-            self.goal = new_goal
-            return {"ok": True, "new_goal": new_goal}
-        
-        def t_set_trading_mode(mode: str):
-            """Switch between MOCK and LIVE trading."""
-            mode = mode.upper()
-            if mode not in ("MOCK", "LIVE"):
-                return {"error": "mode must be MOCK or LIVE"}
-            # AgentLoop will pick this up
-            return {"ok": True, "mode": mode}
-        
-        def t_confirm_trade():
-            """Execute the pending trade (after risk approval)."""
-            return self.confirm_trade()
-        
-        # Register chat tools
-        reg.register("analyze_symbol", "Analyze a bStock symbol (RSI, MACD, EMA, volume, etc.).",
-                     {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}, t_analyze_symbol)
-        reg.register("get_portfolio", "Get current portfolio and risk status.",
-                     {"type": "object", "properties": {}}, t_get_portfolio)
-        reg.register("change_goal", "Update the agent's trading goal.",
-                     {"type": "object", "properties": {"new_goal": {"type": "string"}}, "required": ["new_goal"]}, t_change_goal)
-        reg.register("set_trading_mode", "Switch trading mode: MOCK or LIVE.",
-                     {"type": "object", "properties": {"mode": {"type": "string"}}, "required": ["mode"]}, t_set_trading_mode)
-        reg.register("confirm_trade", "Execute pending trade after risk approval.",
-                     {"type": "object", "properties": {}}, t_confirm_trade)
-        
-        # Also include universe discovery and quick scan
-        def t_discover_universe():
-            try:
-                symbols = discover_bstocks()
-                return {"symbols": symbols, "count": len(symbols)}
-            except Exception as e:
-                return {"error": str(e), "symbols": []}
-        reg.register("discover_universe", "Discover all tradeable bStock symbols on Binance.",
-                     {"type": "object", "properties": {}}, t_discover_universe)
-        
-        def t_quick_scan(min_volume_usd: float = 50000, max_symbols: int = 20):
-            try:
-                return {"candidates": quick_scan(min_volume_usd, max_symbols)}
-            except Exception as e:
-                return {"error": str(e), "candidates": []}
-        reg.register("quick_scan", "Quick volume-filtered scan of bStocks universe.",
-                     {"type": "object", "properties": {
-                         "min_volume_usd": {"type": "number", "default": 50000},
-                         "max_symbols": {"type": "integer", "default": 20}},
-                      "required": []}, t_quick_scan)
-        
-        # Web search tool
-        def t_web_search(query: str, max_results: int = 5):
-            """Search the web for news, docs, rules, etc. Use DuckDuckGo HTML."""
-            import httpx
-            from urllib.parse import quote_plus
-            try:
-                url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
-                resp = httpx.get(url, timeout=10.0, headers={"User-Agent": "Mozilla/5.0"})
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(resp.text, "html.parser")
-                results = []
-                for r in soup.select(".result__snippet, .web-result-description, .snippet"):
-                    txt = r.get_text(strip=True)
-                    if txt and len(txt) > 20:
-                        results.append(txt[:300])
-                        if len(results) >= max_results:
-                            break
-                return {"query": query, "results": results}
-            except Exception as e:
-                return {"error": str(e), "results": []}
-        reg.register("web_search", "Search the web (DuckDuckGo) for news, docs, rules.",
-                     {"type": "object", "properties": {
-                         "query": {"type": "string"}, "max_results": {"type": "integer", "default": 5}},
-                      "required": ["query"]}, t_web_search)
-        
-        # Build messages
-        from ..prompts import SYSTEM
-        messages = [
-            {"role": "system", "content": SYSTEM + "\n\nYou are also a chat assistant. Use tools to answer user questions about bStocks, portfolio, market data, etc. Be concise."},
-            {"role": "user", "content": text},
-        ]
-        
-        result = chat_with_tools(messages, registry, trace, response_json=False)
-        
-        # Extract text response
-        content = result.get("content", "")
-        if not content:
-            return "Sorry, I couldn't process that."
-        
-        trace.save()
-        return content
-
     # ---- trade execution (gated) -------------------------------------
     def confirm_trade(self) -> dict:
         """User-confirmed execution path: risk re-check -> baw order -> verify."""
@@ -491,14 +501,13 @@ class Agent:
             return {"executed": False, "reason": verdict["reason"], "trace": trace}
 
         # Execute via baw CLI (or simulate in mock mode)
-        trace.tool_call("baw_spot_order", {
-            "symbol": pt["symbol"], 
-            "side": "BUY", 
-            "type": "MARKET", 
-            "quote_qty": pt["size_usd"]
+        trace.tool_call("dex_swap_usdt_to_bstock", {
+            "symbol": pt["symbol"],
+            "usdt_amount": pt["size_usd"],
+            "mode": self.trading_mode,
         })
         
-        if self.baw is None:
+        if self.trading_mode == "MOCK" or self.dex is None:
             # Mock execution for development
             import uuid
             result_dict = {
@@ -508,26 +517,29 @@ class Agent:
                 "status": "FILLED",
                 "filled_qty": pt["size_usd"] / pt["entry_price"],
                 "avg_price": pt["entry_price"],
-                "fees_usd": round(pt["size_usd"] * 0.0004, 4),
+                "fees_usd": round(pt["size_usd"] * 0.001, 4),  # DEX fees ~0.1%
                 "error": None,
                 "mock": True,
             }
             executed = True
         else:
+            # LIVE mode - real DEX swap via baw
             try:
-                result = asyncio.run(self.baw.place_spot_order(
-                    side="BUY",
-                    symbol=pt["symbol"],
-                    quote_qty=pt["size_usd"],
-                    order_type="MARKET",
+                result = asyncio.run(self.dex.swap_usdt_to_bstock(
+                    bstock_symbol=pt["symbol"],
+                    usdt_amount=pt["size_usd"],
+                    slippage="1",
+                    gas_level="HIGH",
                 ))
                 executed = result.success
+                # Calculate filled qty from USDT amount and avg price
+                filled_bstock = pt["size_usd"] / result.avg_price if result.avg_price > 0 else 0
                 result_dict = {
                     "success": result.success,
                     "order_id": result.order_id,
                     "tx_hash": result.tx_hash,
                     "status": result.status,
-                    "filled_qty": result.filled_qty,
+                    "filled_qty": filled_bstock,
                     "avg_price": result.avg_price,
                     "fees_usd": result.fees_usd,
                     "error": result.error,
@@ -536,7 +548,7 @@ class Agent:
                 result_dict = {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
                 executed = False
         
-        trace.tool_result("baw_spot_order", result_dict)
+        trace.tool_result("dex_swap_usdt_to_bstock", result_dict)
 
         if executed:
             risk_mod.STATE.record_trade(pt["symbol"], pt["size_usd"])
@@ -545,7 +557,7 @@ class Agent:
 
         self.pending_trade = None
         trace.save()
-        return {"executed": executed, "order": {"symbol": pt["symbol"], "side": "BUY", "type": "MARKET", "quoteOrderQty": pt["size_usd"]}, "result": result_dict,
+        return {"executed": executed, "order": {"symbol": pt["symbol"], "side": "BUY", "type": "DEX_SWAP", "quoteOrderQty": pt["size_usd"]}, "result": result_dict,
                 "trace": trace, "risk": verdict}
 
     def close_position(self, symbol: str, exit_price: float,

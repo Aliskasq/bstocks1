@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>bStocks AI Agent</title>
 <style>
 :root{
@@ -68,15 +71,39 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:
 select{font:inherit;background:var(--bg);color:var(--text);
   border:1px solid var(--line);border-radius:7px;padding:6px 9px}
 @media(max-width:900px){main{grid-template-columns:1fr}}
+
+/* Chat panel styles */
+.chat{height:400px;display:flex;flex-direction:column}
+.chat-messages{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
+.chat-msg{padding:10px 12px;border-radius:8px;max-width:85%;line-height:1.5;font-size:13px}
+.chat-msg.user{align-self:flex-end;background:#132e1c;border:1px solid #1d3a24;color:var(--green)}
+.chat-msg.agent{align-self:flex-start;background:#152030;border:1px solid #1f3350;color:var(--text)}
+.chat-input{display:flex;gap:8px;padding:10px 12px;border-top:1px solid var(--line);background:var(--panel2)}
+.chat-input input{flex:1;min-width:0;padding:8px 12px}
+.mode-toggle{display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:6px;background:var(--panel2);border:1px solid var(--line)}
+.mode-toggle.live{background:#132e1c;border-color:#1d3a24}
+.mode-toggle .dot{width:8px;height:8px;border-radius:50%;background:var(--dim)}
+.mode-toggle.live .dot{background:var(--green)}
+.mode-toggle.mock .dot{background:var(--amber)}
+header button.mock, header button.live{font-size:11px;padding:4px 10px;border-radius:5px;transition:all .15s}
+header button.mock{background:var(--panel2);border-color:#3a2f0d;color:var(--amber)}
+header button.mock.active, header button.mock:hover{background:#1f1a0d;border-color:#d29922;color:var(--amber)}
+header button.live{background:var(--panel2);border-color:#1d3a24;color:var(--green)}
+header button.live.active, header button.live:hover{background:#132e1c;border-color:#3fb950;color:var(--green)}
+header button.mock:disabled, header button.live:disabled{opacity:.4;cursor:not-allowed}
 </style>
 </head>
 <body>
-<header>
+<<header>
   <h1>bStocks AI Agent</h1>
   <span id="st" class="badge off">connecting</span>
   <span id="src" class="badge"></span>
   <span id="auth" class="badge"></span>
   <span style="flex:1"></span>
+  <div style="display:flex;gap:6px;align-items:center">
+    <button id="modeMock" class="mock" title="Mock mode — advisor only">MOCK</button>
+    <button id="modeLive" class="live" title="Live mode — agent executes real trades">LIVE</button>
+  </div>
   <span id="cyc" class="badge">cycles 0</span>
 </header>
 
@@ -114,6 +141,15 @@ select{font:inherit;background:var(--bg);color:var(--text);
   </div>
 
   <div class="card">
+    <h2>Top Movers <span class="dim">(24h change, Binance)</span></h2>
+    <div class="body" style="padding:0">
+      <table><thead><tr><th>Symbol</th><th>Price</th><th>24h %</th></tr></thead>
+      <tbody id="movers"><tr><td colspan="3" class="dim" style="padding:14px">
+        loading…</td></tr></tbody></table>
+    </div>
+  </div>
+
+  <div class="card">
     <h2>Risk manager <span class="dim">(outside the LLM)</span></h2>
     <div class="body" id="risk"><span class="dim">loading…</span></div>
   </div>
@@ -134,22 +170,26 @@ select{font:inherit;background:var(--bg);color:var(--text);
   </div>
 
   <div class="card full">
-    <h2>Chat with Agent</h2>
-    <div class="body" style="display:flex;flex-direction:column;gap:8px">
-      <div id="chat" style="height:300px;overflow-y:auto;padding:8px;background:var(--bg);border:1px solid var(--line);border-radius:7px;display:flex;flex-direction:column;gap:6px"></div>
-      <div style="display:flex;gap:8px">
-        <input id="chatInput" placeholder="Ask the agent… (e.g. 'analyze SOXL', 'show portfolio', 'buy NVDAB')" style="flex:1">
-        <button class="primary" id="chatSend">Send</button>
-      </div>
-    </div>
-  </div>
-
-  <div class="card full">
     <h2>Decision trace <span class="dim">(proof, not claims)</span></h2>
     <div class="body">
       <select id="tsel"><option value="">— select a trace —</option></select>
       <button id="treload">Reload list</button>
       <pre id="tbody" style="margin-top:11px">Pick a trace to inspect every tool call the agent made.</pre>
+    </div>
+  </div>
+
+  <div class="card full">
+    <h2>Chat with Agent</h2>
+    <div class="body" style="padding:0">
+      <div class="chat">
+        <div class="chat-messages" id="chatMsgs">
+          <div class="chat-msg agent">👋 Ready. Ask me anything — analyze a symbol, change goal, approve a trade, check portfolio, switch to live mode...</div>
+        </div>
+        <div class="chat-input">
+          <input id="chatInput" placeholder="Type a message..." autocomplete="off">
+          <button class="primary" id="chatSend">Send</button>
+        </div>
+      </div>
     </div>
   </div>
 </main>
@@ -203,8 +243,18 @@ function renderRisk(s){
     <div class="kv"><span class="dim">max position</span><span>$${L.max_position_usd}</span></div>
     <div class="kv"><span class="dim">daily loss limit</span><span>$${L.max_daily_loss_usd}</span></div>
     <div class="kv"><span class="dim">max trades / day</span><span>${R.trades_today||0} / ${L.max_trades_per_day}</span></div>
-    <div class="kv"><span class="dim">max leverage</span><span>${L.max_leverage}x</span></div>
     <div class="kv"><span class="dim">realized P&amp;L today</span><span>$${(R.realized_pnl_today||0).toFixed(2)}</span></div>`;
+}
+
+function renderMovers(m){
+  if(!m) return;
+  const g = (m.gainers||[]).slice(0,3);
+  const l = (m.losers||[]).slice(0,3);
+  let h = '<tr><td colspan="3" class="dim" style="padding:6px 0;font-weight:bold">📈 GAINERS</td></tr>';
+  g.forEach(s => { h += `<tr><td>${s.symbol}</td><td>$${s.price.toLocaleString()}</td><td class="ok">+${s.change.toFixed(2)}%</td></tr>`; });
+  h += '<tr><td colspan="3" class="dim" style="padding:8px 0 2px;font-weight:bold">📉 LOSERS</td></tr>';
+  l.forEach(s => { h += `<tr><td>${s.symbol}</td><td>$${s.price.toLocaleString()}</td><td class="no">${s.change.toFixed(2)}%</td></tr>`; });
+  $('#movers').innerHTML = h;
 }
 
 function renderWatch(ws){
@@ -222,12 +272,15 @@ async function refresh(){
   $('#st').textContent = s.running ? (s.status||'running') : 'idle';
   $('#st').className = 'badge ' + (s.running?'on':'off');
   $('#cyc').textContent = 'cycles ' + s.cycles;
-  $('#src').textContent = s.data_source === 'mock' ? 'MOCK DATA' : 'live MCP';
+  $('#src').textContent = s.data_source === 'mock' ? 'MOCK DATA' : 'Binance REST';
   $('#src').className = 'badge ' + (s.data_source==='mock'?'warn':'on');
-  $('#auth').textContent = s.authenticated ? 'Agent OS authorized' : 'not authorized';
+  $('#auth').textContent = s.authenticated ? 'baw wallet connected' : 'wallet not connected';
   $('#auth').className = 'badge ' + (s.authenticated?'on':'warn');
+  if(s.address) $('#auth').textContent += ' · ' + s.address.slice(0,6) + '…' + s.address.slice(-4);
   if(s.model){ $('#mnow').textContent = s.model; }
+  if(s.trading_mode){ updateModeBadge(s.trading_mode); }
   renderRisk(s); renderWatch(s.watches);
+  if(s.movers) renderMovers(s.movers);
   if(s.last_decision) renderDecision(s.last_decision, null);
 }
 
@@ -293,65 +346,215 @@ async function confirmTrade(){
   refresh();
 }
 
-// Chat functions
-function renderChatMsg(msg){
+function handleStateEvent(s) {
+  $('#st').textContent = s.running ? (s.status||'running') : 'idle';
+  $('#st').className = 'badge ' + (s.running?'on':'off');
+  $('#cyc').textContent = 'cycles ' + s.cycles;
+  $('#src').textContent = s.data_source === 'mock' ? 'MOCK DATA' : 'Binance REST';
+  $('#src').className = 'badge ' + (s.data_source==='mock'?'warn':'on');
+  $('#auth').textContent = s.authenticated ? 'baw wallet connected' : 'wallet not connected';
+  $('#auth').className = 'badge ' + (s.authenticated?'on':'warn');
+  if(s.address) $('#auth').textContent += ' · ' + s.address.slice(0,6) + '…' + s.address.slice(-4);
+  if(s.model){ $('#mnow').textContent = s.model; }
+  if(s.trading_mode){ updateModeBadge(s.trading_mode); }
+  renderRisk(s); renderWatch(s.watches);
+  if(s.movers) renderMovers(s.movers);
+  if(s.last_decision) renderDecision(s.last_decision, null);
+}
+
+async function refresh(){
+  try {
+    const s = await (await fetch('/api/state')).json();
+    handleStateEvent(s);
+  } catch(e) {
+    $('#st').textContent = 'poll error';
+    $('#st').className = 'badge warn';
+  }
+}
+
+async function refreshChat(){
+  try {
+    const r = await (await fetch('/api/chat_history')).json();
+    $('#chatMsgs').innerHTML = '';
+    for (const ev of r.history) {
+      if (ev.kind === 'chat_user') addChatMsg('user', ev.text, false);
+      else if (ev.kind === 'chat_agent') addChatMsg('agent', ev.text, false);
+      else if (ev.kind === 'chat_tool_call') addChatToolCall(ev.tool, ev.args);
+      else if (ev.kind === 'chat_tool_result') addChatToolResult(ev.tool, ev.result);
+    }
+    $('#chatMsgs').scrollTop = $('#chatMsgs').scrollHeight;
+  } catch(e) {}
+}
+
+async function loadModels(refreshList){
+  const free = $('#mfree').checked ? 'true' : 'false';
+  const q = `/api/models?free_only=${free}&tools_only=true&refresh=${refreshList?'true':'false'}`;
+  const r = await (await fetch(q)).json();
+  if(r.error){
+    $('#msel').innerHTML = `<option value="">error: ${r.error}</option>`;
+    return;
+  }
+  $('#msel').innerHTML = r.models.map(m => {
+    const ctx = m.context_length ? ` · ${Math.round(m.context_length/1000)}k ctx` : '';
+    const sel = m.id === r.active ? ' selected' : '';
+    return `<option value="${m.id}"${sel}>${m.id}${ctx}</option>`;
+  }).join('') || '<option value="">no models matched</option>';
+  $('#mnow').textContent = r.active;
+}
+
+$('#mset').onclick = async () => {
+  const model = $('#msel').value;
+  if(!model) return;
+  $('#mset').disabled = true;
+  const r = await (await fetch('/api/model', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({model})})).json();
+  $('#mset').disabled = false;
+  if(r.ok){ $('#mnow').textContent = r.active;
+    logline(Date.now()/1000, 'model switched to '+r.active, '#3fb950'); }
+  else { logline(Date.now()/1000, 'model switch failed: '+r.error, '#f85149'); }
+};
+$('#mreload').onclick = () => loadModels(true);
+$('#mfree').onchange = () => loadModels(false);
+
+async function loadTraces(){
+  const r = await (await fetch('/api/traces')).json();
+  $('#tsel').innerHTML = '<option value="">— select a trace —</option>' +
+    r.traces.map(t=>`<option value="${t}">${t}</option>`).join('');
+}
+
+$('#tsel').onchange = async e => {
+  if(!e.target.value) return;
+  const t = await (await fetch('/api/traces/'+e.target.value)).json();
+  $('#tbody').textContent = JSON.stringify(t, null, 2);
+};
+$('#treload').onclick = loadTraces;
+
+$('#start').onclick = async () => {
+  await fetch('/api/start', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({goal: $('#goal').value})});
+  refresh();
+};
+$('#stop').onclick = async () => { await fetch('/api/stop',{method:'POST'}); refresh(); };
+$('#once').onclick = async () => {
+  $('#once').disabled = true; $('#once').textContent = 'thinking…';
+  const r = await (await fetch('/api/cycle',{method:'POST'})).json();
+  renderDecision(r.decision, r.risk); loadTraces(); refresh();
+  $('#once').disabled = false; $('#once').textContent = 'Run one cycle';
+};
+async function confirmTrade(){
+  const r = await (await fetch('/api/confirm',{method:'POST'})).json();
+  logline(Date.now()/1000, 'EXECUTION: '+JSON.stringify(r), '#3fb950');
+  refresh();
+}
+
+/* ===== Chat (HTTP polling) ===== */
+
+function addChatMsg(role, text, save = true) {
   const d = document.createElement('div');
-  const t = fmt(msg.ts);
-  let color = '#8b96a5', prefix = '';
-  if(msg.kind === 'chat_user'){ color = '#58a6ff'; prefix = 'You: '; }
-  else if(msg.kind === 'chat_agent'){ color = '#3fb950'; prefix = 'Agent: '; }
-  else if(msg.kind === 'chat_tool_call'){ color = '#bc8cff'; prefix = '🔧 ' + msg.tool + ': '; }
-  else if(msg.kind === 'chat_tool_result'){ color = '#8b96a5'; prefix = '✅ result: '; }
-  d.innerHTML = `<span class="t">${t}</span><span style="color:${color}">${prefix}${msg.text||JSON.stringify(msg.result||msg.args||'')}</span>`;
-  $('#chat').appendChild(d);
-  $('#chat').scrollTop = $('#chat').scrollHeight;
+  d.className = 'chat-msg ' + (role === 'user' ? 'user' : 'agent');
+  d.textContent = text;
+  $('#chatMsgs').appendChild(d);
+  $('#chatMsgs').scrollTop = $('#chatMsgs').scrollHeight;
+}
+
+function addChatToolCall(tool, args) {
+  const d = document.createElement('div');
+  d.className = 'chat-msg agent';
+  d.style.fontSize = '11px';
+  d.style.color = '#58a6ff';
+  d.style.fontFamily = 'monospace';
+  d.textContent = '🔧 ' + tool + '(' + JSON.stringify(args) + ')';
+  $('#chatMsgs').appendChild(d);
+  $('#chatMsgs').scrollTop = $('#chatMsgs').scrollHeight;
+}
+
+function addChatToolResult(tool, result) {
+  const d = document.createElement('div');
+  d.className = 'chat-msg agent';
+  d.style.fontSize = '11px';
+  d.style.color = '#3fb950';
+  d.style.fontFamily = 'monospace';
+  d.textContent = '📥 ' + tool + ': ' + result;
+  $('#chatMsgs').appendChild(d);
+  $('#chatMsgs').scrollTop = $('#chatMsgs').scrollHeight;
 }
 
 async function loadChatHistory(){
-  const r = await (await fetch('/api/chat_history')).json();
-  (r.history||[]).forEach(renderChatMsg);
+  try {
+    const r = await (await fetch('/api/chat_history')).json();
+    $('#chatMsgs').innerHTML = '';
+    for (const ev of r.history) {
+      if (ev.kind === 'chat_user') addChatMsg('user', ev.text, false);
+      else if (ev.kind === 'chat_agent') addChatMsg('agent', ev.text, false);
+      else if (ev.kind === 'chat_tool_call') addChatToolCall(ev.tool, ev.args);
+      else if (ev.kind === 'chat_tool_result') addChatToolResult(ev.tool, ev.result);
+    }
+    $('#chatMsgs').scrollTop = $('#chatMsgs').scrollHeight;
+  } catch (e) {}
 }
 
-$('#chatSend').onclick = async () => {
+async function sendChat(){
   const input = $('#chatInput');
   const text = input.value.trim();
   if(!text) return;
   input.value = '';
-  // Send via WS
-  if(sock.readyState === WebSocket.OPEN){
-    sock.send(JSON.stringify({kind: 'user_message', text}));
+  addChatMsg('user', text);
+  try{
+    const r = await (await fetch('/api/chat', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({text})})).json();
+    if(r.ok){
+      logline(Date.now()/1000, 'chat sent', '#3fb950');
+      // Refresh chat history after short delay
+      setTimeout(loadChatHistory, 500);
+    } else {
+      addChatMsg('agent', '⚠️ Failed: ' + r.error);
+    }
+  }catch(e){
+    addChatMsg('agent', '⚠️ Failed to send: '+e);
   }
-};
+}
 
-$('#chatInput').addEventListener('keydown', e => {
-  if(e.key === 'Enter') $('#chatSend').click();
-});
+$('#chatSend').onclick = sendChat;
+$('#chatInput').onkeydown = e => { if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); sendChat(); } };
 
-const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-const sock = new WebSocket(`${proto}://${location.host}/ws`);
-sock.onmessage = ev => {
-  const e = JSON.parse(ev.data);
-  if(e.kind === 'status'){ logline(e.ts, e.status, '#8b96a5'); refresh(); }
-  else if(e.kind === 'watch_check')
-    logline(e.ts, `${e.symbol} $${e.price} (ref $${e.reference_price}) rsi ${e.rsi}`, '#8b96a5');
-  else if(e.kind === 'condition_triggered'){
-    logline(e.ts, `TRIGGERED ${e.symbol} ${e.condition} — ${e.detail}`, '#d29922'); refresh();
+/* Trading mode badge update */
+function updateModeBadge(mode){
+  const mockBtn = $('#modeMock'), liveBtn = $('#modeLive');
+  if(mode === 'LIVE'){
+    mockBtn.classList.remove('active'); mockBtn.disabled = false;
+    liveBtn.classList.add('active'); liveBtn.disabled = false;
+  } else if(mode === 'MOCK'){
+    liveBtn.classList.remove('active'); liveBtn.disabled = false;
+    mockBtn.classList.add('active'); mockBtn.disabled = false;
+  } else {
+    mockBtn.disabled = true; liveBtn.disabled = true;
   }
-  else if(e.kind === 'decision'){
-    logline(e.ts, `decision #${e.cycle}${e.reanalysis?' (re-analysis)':''}: `+
-      `${e.decision?.symbol} → ${e.decision?.decision}`, '#58a6ff');
-    renderCands(e.candidates); renderDecision(e.decision, e.risk); loadTraces(); refresh();
-  }
-  else if(e.kind === 'tool_call') logline(e.ts||Date.now()/1000, `→ ${e.tool}`, '#58a6ff');
-  else if(e.kind === 'error') logline(e.ts, 'ERROR '+e.error, '#f85149');
-  else if(e.kind === 'chat_user' || e.kind === 'chat_agent' || e.kind === 'chat_tool_call' || e.kind === 'chat_tool_result'){
-    renderChatMsg(e);
-  }
-};
-sock.onopen = () => { loadChatHistory(); };
-sock.onclose = () => { $('#st').textContent='disconnected'; $('#st').className='badge off'; };
+}
 
-refresh(); loadTraces(); loadModels(false); loadChatHistory(); setInterval(refresh, 5000);
+$('#modeMock').onclick = () => setTradingMode('MOCK');
+$('#modeLive').onclick = () => setTradingMode('LIVE');
+
+async function setTradingMode(mode){
+  const btn = $('#mode' + (mode==='MOCK'?'Mock':'Live'));
+  btn.disabled = true; btn.textContent = '...';
+  try{
+    const r = await (await fetch('/api/trading_mode',{method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({mode})})).json();
+    if(r.ok){ updateModeBadge(mode);
+      logline(Date.now()/1000, 'trading mode → '+mode, mode==='LIVE'?'#3fb950':'#d29922'); }
+    else { logline(Date.now()/1000, 'mode switch failed: '+r.error, '#f85149'); }
+  }catch(e){
+    logline(Date.now()/1000, 'mode switch error: '+e, '#f85149');
+  }
+  refresh();
+}
+
+// Polling only — no WebSocket
+refresh(); loadTraces(); loadModels(false); loadChatHistory();
+setInterval(refresh, 3000);
+setInterval(refreshChat, 3000);
 </script>
 </body>
 </html>
