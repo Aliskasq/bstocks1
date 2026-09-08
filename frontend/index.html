@@ -485,13 +485,16 @@ async function loadChatHistory(){
   try {
     const r = await (await fetch('/api/chat_history')).json();
     $('#chatMsgs').innerHTML = '';
-    for (const ev of r.history) {
+    const history = (r.history || []).slice(-30); // Last 30 messages only
+    for (const ev of history) {
       if (ev.kind === 'chat_user') addChatMsg('user', ev.text, false);
       else if (ev.kind === 'chat_agent') addChatMsg('agent', ev.text, false);
       else if (ev.kind === 'chat_tool_call') addChatToolCall(ev.tool, ev.args);
       else if (ev.kind === 'chat_tool_result') addChatToolResult(ev.tool, ev.result);
     }
     $('#chatMsgs').scrollTop = $('#chatMsgs').scrollHeight;
+  } catch(e) {}
+}
   } catch (e) {}
 }
 
@@ -556,6 +559,7 @@ async function setTradingMode(mode){
 refresh(); loadTraces(); loadModels(false); loadChatHistory();
 setInterval(refresh, 3000);
 setInterval(refreshChat, 3000);
+setInterval(loadChatHistory, 3000);
 </script>
 </body>
 </html>
