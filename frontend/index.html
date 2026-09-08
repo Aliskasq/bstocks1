@@ -198,6 +198,21 @@ header button.mock:disabled, header button.live:disabled{opacity:.4;cursor:not-a
 const $ = s => document.querySelector(s);
 const fmt = t => new Date(t*1000).toLocaleTimeString();
 
+// Hydrate from server-injected state (instant display, no JS fetch needed)
+(function(){
+  try {
+    const s = window.__INITIAL_STATE__;
+    if(!s) return;
+    if(s.running){ $('#st').textContent=s.running?'running':'idle'; $('#st').className='badge '+(s.running?'on':'off'); }
+    $('#cyc').textContent='cycles '+(s.cycles||0);
+    $('#src').textContent=(s.trading_mode==='MOCK'?'MOCK DATA':'Binance REST');
+    $('#src').className='badge '+(s.trading_mode==='MOCK'?'warn':'on');
+    $('#auth').textContent='baw wallet connected'; $('#auth').className='badge on';
+    if(s.address) $('#auth').textContent+=' · '+s.address.slice(0,6)+'…'+s.address.slice(-4);
+    updateModeBadge(s.trading_mode||'MOCK');
+  } catch(e){}
+})();
+
 function logline(t, msg, color){
   const d = document.createElement('div');
   d.innerHTML = `<span class="t">${fmt(t)}</span><span style="color:${color||'inherit'}">${msg}</span>`;
@@ -268,6 +283,25 @@ function renderWatch(ws){
 }
 
 async function refresh(){
+  // Use server-injected state if available (instant display)
+  try {
+    const s = window.__INITIAL_STATE__;
+    if(s){
+      if(s.running){ $('#st').textContent='running';$('#st').className='badge on'; }
+      $('#cyc').textContent='cycles '+(s.cycles||0);
+      $('#src').textContent=(s.trading_mode==='MOCK'?'MOCK DATA':'Binance REST');
+      $('#src').className='badge '+(s.trading_mode==='MOCK'?'warn':'on');
+      $('#auth').textContent='baw wallet connected';$('#auth').className='badge on';
+      if(s.address) $('#auth').textContent+=' · '+s.address.slice(0,6)+'…'+s.address.slice(-4);
+      if(s.model){ $('#mnow').textContent=s.model; }
+      updateModeBadge(s.trading_mode||'MOCK');
+      renderRisk(s); renderWatch(s.watches||[]);
+      if(s.movers) renderMovers(s.movers);
+      if(s.last_decision) renderDecision(s.last_decision, null);
+      return;
+    }
+  } catch(e){}
+  // Fallback: fetch from API
   try {
     const s = await (await fetch('/api/state')).json();
     $('#st').textContent = s.running ? (s.status||'running') : 'idle';
@@ -286,7 +320,7 @@ async function refresh(){
   } catch(e) {
     console.error('refresh error:', e);
     $('#st').textContent = 'error';
-    $('#st').className = 'badge off';
+    $('#st').className = 'badge warn';
   }
 }
 

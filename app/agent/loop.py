@@ -93,7 +93,7 @@ class AgentLoop:
             "watches": [w.to_dict() for w in watches],
             "risk_limits": risk_limits,
             "risk_state": risk_state,
-            "last_decision": {k: v for k, v in self.agent.last_decision.items() if k != "symbols"},
+            "last_decision": {k: v for k, v in self.agent.last_decision.items() if k != "symbols"} if self.agent.last_decision else {},
         }
 
         # Register ALL tools from the agent's full registry + chat-specific ones

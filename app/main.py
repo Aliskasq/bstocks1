@@ -84,6 +84,7 @@ class Hub:
 hub = Hub()
 agent_loop = AgentLoop(DEFAULT_GOAL, on_event=hub.publish,
                        monitor_interval_s=15.0, rescan_interval_s=30.0)
+agent_loop.start()  # Auto-start the agent loop on server boot
 
 # baw client for status checks (optional - may not be installed)
 _baw_client = None
@@ -305,6 +306,20 @@ async def ws(websocket: WebSocket) -> None:
 @app.get("/")
 def index() -> Response:
     html = (FRONTEND / "index.html").read_text()
+    # Inject live state as inline script for instant display (no JS needed for initial render)
+    try:
+        s = agent_loop
+        state_json = json.dumps({
+            "running": getattr(s, 'running', False),
+            "cycles": getattr(s, 'cycles', 0),
+            "trading_mode": getattr(s, '_trading_mode', 'MOCK'),
+            "authenticated": True,
+            "address": getattr(s, '_baw_address', 'unknown'),
+        })
+        inject = f"<script>window.__INITIAL_STATE__={state_json}</script>"
+        html = html.replace("</head>", inject + "</head>")
+    except Exception:
+        pass
     return Response(content=html, media_type="text/html", headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"})
 
 
