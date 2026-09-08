@@ -29,11 +29,18 @@ class Hub:
         self.clients: set[WebSocket] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.backlog: list[dict] = []
+        self.chat_history: list[dict] = []  # persist chat messages
 
     async def register(self, ws: WebSocket) -> None:
         await ws.accept()
         self.clients.add(ws)
         for ev in self.backlog[-80:]:
+            try:
+                await ws.send_text(json.dumps(ev, default=str))
+            except Exception:
+                break
+        # Send chat history to new client
+        for ev in self.chat_history:
             try:
                 await ws.send_text(json.dumps(ev, default=str))
             except Exception:
@@ -46,6 +53,10 @@ class Hub:
         """Called from the agent's worker thread."""
         self.backlog.append(event)
         self.backlog = self.backlog[-300:]
+        # Also persist chat messages
+        if event.get("kind") in ("chat_user", "chat_agent", "chat_tool_call", "chat_tool_result"):
+            self.chat_history.append(event)
+            self.chat_history = self.chat_history[-200:]
         if not self.loop:
             return
         asyncio.run_coroutine_threadsafe(self._broadcast(event), self.loop)
@@ -81,6 +92,52 @@ async def _startup() -> None:
 
 # ---- API ----------------------------------------------------------------
 
+async def get_movers():
+    """Fetch top 3 gainers and losers from Binance 24h ticker for bStocks."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get("https://api.binance.com/api/v3/ticker/24hr")
+            resp.raise_for_status()
+            data = resp.json()
+        
+        # Filter bStocks (symbols ending with BUSDT, excluding false positives)
+        false_positives = {"BNBUSDT", "SHIBUSDT", "ARBUSDT", "TRBUSDT", "CKBUSDT",
+                          "DGBUSDT", "YBUSDT", "STXBUSDT", "BBUSDT", "QNTBUSDT",
+                          "MUBUSDT", "GSBUSDT", "MUUBUSDT"}
+        
+        bstocks = [
+            d for d in data
+            if d["symbol"].endswith("BUSDT") and d["symbol"] not in false_positives
+        ]
+        
+        # Sort by price change percent
+        bstocks.sort(key=lambda x: float(x["priceChangePercent"]), reverse=True)
+        
+        gainers = bstocks[:3]
+        losers = bstocks[-3:][::-1]  # bottom 3, ascending
+        
+        def fmt(d):
+            return {
+                "symbol": d["symbol"],
+                "price": float(d["lastPrice"]),
+                "change": float(d["priceChangePercent"]),
+            }
+        
+        return {
+            "gainers": [fmt(d) for d in gainers],
+            "losers": [fmt(d) for d in losers],
+        }
+    except Exception:
+        return {"gainers": [], "losers": []}
+
+
+@app.get("/api/movers")
+async def movers():
+    """Top 3 gainers/losers among bStocks (24h)."""
+    return await get_movers()
+
+
 @app.get("/api/state")
 async def state() -> dict:
     if _baw_client:
@@ -92,6 +149,7 @@ async def state() -> dict:
         baw_address = None
     return {
         **agent_loop.state(),
+        "trading_mode": agent_loop.trading_mode,
         "risk_limits": risk_mod.limits(),
         "risk_state": {
             "trades_today": risk_mod.STATE.trades_today,
@@ -100,9 +158,22 @@ async def state() -> dict:
         },
         "model": llm.active_model(),
         "data_source": "mock" if ALLOW_MOCK_MARKET else "binance_rest",
-        "baw_authenticated": baw_authenticated,
-        "baw_address": baw_address,
+        "authenticated": baw_authenticated,
+        "address": baw_address,
+        "movers": await get_movers(),
     }
+
+
+@app.post("/api/trading_mode")
+def set_trading_mode(payload: dict) -> dict:
+    """Switch trading mode via dashboard button (MOCK/LIVE)."""
+    mode = (payload or {}).get("mode", "").upper()
+    if mode not in ("MOCK", "LIVE"):
+        return {"ok": False, "error": "mode must be MOCK or LIVE"}
+    result = agent_loop.set_trading_mode(mode)
+    hub.publish({"kind": "status", "ts": time.time(),
+                 "status": f"trading mode changed to {mode}"})
+    return {"ok": True, "message": result, "mode": mode}
 
 
 @app.get("/api/models")
@@ -185,6 +256,11 @@ def trace(name: str) -> JSONResponse:
     return JSONResponse(json.loads(path.read_text()))
 
 
+@app.get("/api/chat_history")
+def chat_history() -> dict:
+    return {"history": hub.chat_history}
+
+
 @app.get("/api/events")
 def events() -> dict:
     return {"events": agent_loop.history[-150:]}
@@ -195,7 +271,21 @@ async def ws(websocket: WebSocket) -> None:
     await hub.register(websocket)
     try:
         while True:
-            await websocket.receive_text()
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+                if msg.get("kind") == "user_message":
+                    text = msg.get("text", "").strip()
+                    if text:
+                        # Emit user message to all clients
+                        hub.publish({"kind": "chat_user", "ts": time.time(), "text": text})
+                        # Process through agent
+                        response = agent_loop.agent.handle_chat(text)
+                        # Emit agent response
+                        hub.publish({"kind": "chat_agent", "ts": time.time(), "text": response})
+            except json.JSONDecodeError:
+                # Ignore non-JSON (old ping/pong)
+                pass
     except WebSocketDisconnect:
         hub.unregister(websocket)
     except Exception:

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 baw CLI Wrapper — Binance Agentic Wallet integration via subprocess.
-Replaces MCP for spot trading operations (bStocks).
+Works with baw CLI v1.9.0+ for DEX swaps on BSC (PancakeSwap) for bStocks.
 
 Usage:
     from app.tools.baw_cli import BawClient
     client = BawClient()
     await client.check_auth()
-    result = await client.place_spot_order("BUY", "NVDAB-USDT", 50.0)  # $50 market buy
+    quote = await client.get_quote("NVDAB", 50.0)  # $50 USDT quote for NVDAB
+    result = await client.swap("NVDAB", 50.0)      # $50 market swap
 """
 import asyncio
 import json
@@ -29,13 +30,26 @@ class BawAuthStatus:
 
 
 @dataclass
-class BawOrderResult:
+class BawQuoteResult:
+    success: bool
+    from_token: str
+    to_token: str
+    from_qty: float
+    to_qty: float
+    price_usd: float
+    price_impact_pct: float
+    error: Optional[str] = None
+    raw_response: Optional[Dict] = None
+
+
+@dataclass
+class BawSwapResult:
     success: bool
     tx_hash: Optional[str] = None
     order_id: Optional[str] = None
-    status: str = "UNKNOWN"  # SUCCESS, PARTIAL, REJECTED, PENDING, FILLED
-    filled_qty: float = 0.0
-    avg_price: float = 0.0
+    status: str = "UNKNOWN"
+    from_qty: float = 0.0
+    to_qty: float = 0.0
     fees_usd: float = 0.0
     error: Optional[str] = None
     raw_response: Optional[Dict] = None
@@ -59,6 +73,19 @@ class BawAccountInfo:
     available_balance: float
     unrealized_pnl: float
     positions: List[BawPosition]
+
+
+# bStock token addresses on BSC (chain 56)
+BSTOCKS_TOKENS = {
+    "NVDAB": "0x02Fca66C1D1aFB4E2A7884261eB00F63598a7436",
+    "TSLAB": "0x5b1910eAaD6450E50f816082Aa078C41F10C292f",
+    # Add more as discovered
+}
+
+# USDT on BSC
+USDT_BSC = "0x55d398326f99059fF775485246999027B3197955"
+
+BSC_CHAIN_ID = 56
 
 
 class BawClient:
@@ -115,129 +142,160 @@ class BawClient:
     
     async def check_auth(self) -> BawAuthStatus:
         """Check if baw has valid authenticated session."""
-        result = await self._run_cmd(["auth", "status", "--json"])
+        result = await self._run_cmd(["wallet", "status", "--json"])
         
         if "error" in result:
             return BawAuthStatus(authenticated=False, error=result["error"])
         
+        # baw returns: {"success": true, "data": {"status": "CONNECTED"}}
+        authenticated = result.get("success", False) and result.get("data", {}).get("status") == "CONNECTED"
+        
+        # Get primary address (EVM/BSC)
+        addr_result = await self._run_cmd(["wallet", "address", "--json"])
+        address = None
+        if "success" in addr_result:
+            for a in addr_result.get("data", {}).get("addresses", []):
+                if a.get("binanceChainId") in ("56", "1", "137", "42161", "4663", "8453"):
+                    address = a.get("address")
+                    break
+        
         return BawAuthStatus(
-            authenticated=result.get("authenticated", False),
-            address=result.get("address"),
-            chain_id=result.get("chainId"),
-            expires_at=result.get("expiresAt"),
+            authenticated=authenticated,
+            address=address,
+            chain_id=BSC_CHAIN_ID,
         )
     
-    # ==================== SPOT TRADING (bStocks) ====================
+    # ==================== DEX SWAPS (bStocks on BSC) ====================
     
-    async def place_spot_order(
-        self,
-        side: str,  # "BUY" | "SELL"
-        symbol: str,  # e.g., "NVDAB-USDT"
-        quote_qty: float,  # quote asset amount (USDT) for market orders
-        price: Optional[float] = None,  # limit price
-        order_type: str = "MARKET",  # MARKET | LIMIT
-        time_in_force: str = "GTC",
-    ) -> BawOrderResult:
-        """
-        Place spot order via baw CLI for bStocks.
-        """
-        args = ["spot", "order", "--json"]
-        args.extend(["--side", side.upper()])
-        args.extend(["--symbol", symbol.upper()])
+    def _resolve_token(self, symbol: str) -> Optional[str]:
+        """Resolve bStock symbol to token address."""
+        return BSTOCKS_TOKENS.get(symbol.upper())
+    
+    async def get_quote(self, symbol: str, usdt_amount: float) -> BawQuoteResult:
+        """Get swap quote: USDT -> bStock."""
+        from_token = USDT_BSC
+        to_token = self._resolve_token(symbol)
         
-        if order_type == "MARKET":
-            args.extend(["--type", "MARKET"])
-            args.extend(["--quote-qty", str(quote_qty)])
-        else:
-            args.extend(["--type", "LIMIT"])
-            args.extend(["--price", str(price)])
-            # For limit, need base qty
-            args.extend(["--quantity", str(quote_qty / price if price else 0)])
+        if not to_token:
+            return BawQuoteResult(
+                success=False, error=f"Unknown bStock symbol: {symbol}",
+                from_token="", to_token="", from_qty=0, to_qty=0, price_usd=0, price_impact_pct=0
+            )
         
-        args.extend(["--tif", time_in_force])
+        args = ["market-order", "quote", "--json"]
+        args.extend(["--binanceChainId", str(BSC_CHAIN_ID)])
+        args.extend(["--fromToken", from_token])
+        args.extend(["--toToken", to_token])
+        args.extend(["--fromTokenQty", str(usdt_amount)])
         
         result = await self._run_cmd(args)
-        return self._parse_order_result(result)
+        
+        if "error" in result:
+            return BawQuoteResult(
+                success=False, error=result["error"],
+                from_token=from_token, to_token=to_token,
+                from_qty=usdt_amount, to_qty=0, price_usd=0, price_impact_pct=0,
+                raw_response=result
+            )
+        
+        data = result.get("data", result)
+        # baw quote response structure
+        to_qty = float(data.get("toTokenQty", data.get("toQty", 0)))
+        price_impact = float(data.get("priceImpact", data.get("priceImpactPct", 0)))
+        price_usd = usdt_amount / to_qty if to_qty > 0 else 0
+        
+        return BawQuoteResult(
+            success=True,
+            from_token=from_token,
+            to_token=to_token,
+            from_qty=usdt_amount,
+            to_qty=to_qty,
+            price_usd=price_usd,
+            price_impact_pct=price_impact,
+            raw_response=result,
+        )
     
-    async def cancel_order(self, order_id: str, symbol: str) -> bool:
-        """Cancel open order."""
-        result = await self._run_cmd(["spot", "cancel", "--order-id", order_id, "--symbol", symbol.upper(), "--json"])
-        return result.get("success", False)
-    
-    async def get_order_status(self, order_id: str, symbol: str) -> Optional[BawOrderResult]:
-        """Get order status."""
-        result = await self._run_cmd(["spot", "status", "--order-id", order_id, "--symbol", symbol.upper(), "--json"])
-        return self._parse_order_result(result) if "error" not in result else None
+    async def swap(self, symbol: str, usdt_amount: float, slippage: float = 1.0) -> BawSwapResult:
+        """Execute market swap: USDT -> bStock."""
+        from_token = USDT_BSC
+        to_token = self._resolve_token(symbol)
+        
+        if not to_token:
+            return BawSwapResult(
+                success=False, error=f"Unknown bStock symbol: {symbol}",
+                from_qty=usdt_amount, to_qty=0
+            )
+        
+        args = ["market-order", "swap", "--json"]
+        args.extend(["--binanceChainId", str(BSC_CHAIN_ID)])
+        args.extend(["--fromToken", from_token])
+        args.extend(["--toToken", to_token])
+        args.extend(["--fromTokenQty", str(usdt_amount)])
+        args.extend(["--slippage", str(slippage)])
+        
+        result = await self._run_cmd(args)
+        
+        if "error" in result:
+            return BawSwapResult(
+                success=False, error=result["error"],
+                from_qty=usdt_amount, to_qty=0,
+                raw_response=result
+            )
+        
+        data = result.get("data", result)
+        tx_hash = data.get("txHash", data.get("transactionHash"))
+        order_id = data.get("orderId", data.get("order_id"))
+        to_qty = float(data.get("toTokenQty", data.get("toQty", 0)))
+        status = data.get("status", "PENDING")
+        fees = float(data.get("fees", data.get("gasFee", 0)))
+        
+        return BawSwapResult(
+            success=status in ("SUCCESS", "FILLED", "PARTIAL"),
+            tx_hash=tx_hash,
+            order_id=order_id,
+            status=status,
+            from_qty=usdt_amount,
+            to_qty=to_qty,
+            fees_usd=fees,
+            raw_response=result,
+        )
     
     # ==================== ACCOUNT / POSITIONS ====================
     
-    async def get_account(self) -> Optional[BawAccountInfo]:
-        """Get account equity and positions."""
-        result = await self._run_cmd(["account", "info", "--json"])
+    async def get_balances(self) -> Dict[str, float]:
+        """Get token balances (only non-zero)."""
+        result = await self._run_cmd(["wallet", "balance", "--json"])
         
         if "error" in result:
-            return None
-        
-        positions = []
-        for p in result.get("positions", []):
-            positions.append(BawPosition(
-                symbol=p["symbol"],
-                side=p.get("side", "LONG"),
-                size=float(p["size"]),
-                entry_price=float(p["entryPrice"]),
-                current_price=float(p["markPrice"]),
-                unrealized_pnl=float(p.get("unrealizedPnl", 0)),
-                unrealized_pnl_pct=float(p.get("unrealizedPnlPct", 0)),
-                position_usd=float(p["positionUsd"]),
-            ))
-        
-        return BawAccountInfo(
-            equity=float(result.get("totalWalletBalance", 0)),
-            available_balance=float(result.get("availableBalance", 0)),
-            unrealized_pnl=float(result.get("totalUnrealizedPnl", 0)),
-            positions=positions,
-        )
-    
-    async def get_positions(self) -> Dict[str, BawPosition]:
-        """Get open positions as dict keyed by symbol."""
-        account = await self.get_account()
-        if not account:
             return {}
-        return {p.symbol: p for p in account.positions}
+        
+        balances = {}
+        data = result.get("data", result)
+        for item in data.get("balances", []):
+            token = item.get("token", {})
+            symbol = token.get("symbol", "UNKNOWN")
+            amount = float(item.get("amount", 0))
+            if amount > 0:
+                balances[symbol] = amount
+        
+        return balances
     
     async def get_equity(self) -> float:
-        """Get total account equity."""
-        account = await self.get_account()
-        return account.equity if account else 0.0
-    
-    async def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict]:
-        """Get open orders."""
-        args = ["spot", "open-orders", "--json"]
-        if symbol:
-            args.extend(["--symbol", symbol.upper()])
-        result = await self._run_cmd(args)
-        if "error" in result:
-            return []
-        return result.get("orders", [])
+        """Get total USDT balance (approximate equity)."""
+        balances = await self.get_balances()
+        return balances.get("USDT", 0.0)
     
     # ==================== HELPERS ====================
     
-    def _parse_order_result(self, result: Dict) -> BawOrderResult:
-        """Parse baw order response into BawOrderResult."""
-        if "error" in result:
-            return BawOrderResult(success=False, error=result["error"], raw_response=result)
-        
-        status = result.get("status", "UNKNOWN")
-        return BawOrderResult(
-            success=status in ("SUCCESS", "FILLED", "PARTIAL"),
-            tx_hash=result.get("txHash") or result.get("transactionHash"),
-            order_id=result.get("orderId") or result.get("order_id"),
-            status=status,
-            filled_qty=float(result.get("filledQty", result.get("executedQty", 0))),
-            avg_price=float(result.get("avgPrice", result.get("price", 0))),
-            fees_usd=float(result.get("fees", result.get("commission", 0))),
-            raw_response=result,
-        )
+    async def get_bstock_balances(self) -> Dict[str, float]:
+        """Get balances of known bStocks."""
+        balances = await self.get_balances()
+        bstock_balances = {}
+        for symbol, address in BSTOCKS_TOKENS.items():
+            # Balance response uses token symbols, need to match
+            # For now return raw balances
+            pass
+        return balances
 
 
 # ==================== SYNC WRAPPERS (for non-async contexts) ====================
@@ -276,13 +334,13 @@ if __name__ == "__main__":
         print(f"Auth: {auth}")
         
         if auth.authenticated:
-            # Get account
-            account = await client.get_account()
-            print(f"Equity: ${account.equity:.2f}")
-            print(f"Available: ${account.available_balance:.2f}")
-            print(f"Positions: {len(account.positions)}")
-            for p in account.positions:
-                print(f"  {p.symbol}: {p.side} {p.size:.4f} @ ${p.entry_price:.2f} = ${p.position_usd:.2f} (PnL: ${p.unrealized_pnl:.2f})")
+            # Get balances
+            balances = await client.get_balances()
+            print(f"Balances: {balances}")
+            
+            # Test quote for NVDAB
+            quote = await client.get_quote("NVDAB", 50.0)
+            print(f"Quote: {quote}")
         else:
             print("Not authenticated. Run 'baw auth signin' first.")
     

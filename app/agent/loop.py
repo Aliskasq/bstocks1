@@ -34,6 +34,8 @@ class AgentLoop:
         self.cycles = 0
         self.status = "idle"
         self.history: list[dict] = []
+        self.trading_mode = "MOCK"  # MOCK | LIVE
+        self.trading_mode = "MOCK"
 
     # ---- events ------------------------------------------------------
     def _emit(self, kind: str, **data) -> None:
@@ -113,6 +115,14 @@ class AgentLoop:
 
     def stop(self) -> None:
         self.running = False
+
+    def set_trading_mode(self, mode: str) -> str:
+        """Switch trading mode: MOCK or LIVE."""
+        if mode not in ("MOCK", "LIVE"):
+            return f"Invalid mode: {mode}"
+        old = self.trading_mode
+        self.trading_mode = mode
+        return f"Trading mode changed from {old} to {mode}"
 
     def state(self) -> dict:
         return {

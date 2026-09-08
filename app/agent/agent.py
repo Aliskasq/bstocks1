@@ -354,6 +354,124 @@ class Agent:
         self.watchlist.drop(symbol)
         return out
 
+    def handle_chat(self, text: str) -> str:
+        """Process a natural language chat message from the user."""
+        from ..services.openrouter import ToolRegistry, chat_with_tools, extract_json
+        
+        # Build a tool registry for chat (same as decision cycle but without decision logic)
+        trace = Trace(f"[chat] {text}", on_event=self.on_event)
+        self.invalidate()
+        
+        registry = ToolRegistry()
+        
+        # Chat-specific tools
+        def t_analyze_symbol(symbol: str):
+            """Analyze a bStock symbol with all indicators."""
+            c = self._candles(symbol)
+            ind = all_indicators(c)
+            return {"symbol": symbol, "price": c[-1]["close"], **ind}
+        
+        def t_get_portfolio():
+            """Get current portfolio status."""
+            return {
+                "trading_mode": self.trading_mode if hasattr(self, 'trading_mode') else "MOCK",
+                "trades_today": risk_mod.STATE.trades_today,
+                "realized_pnl_today": risk_mod.STATE.realized_pnl_today,
+                "open_positions": risk_mod.STATE.open_positions,
+            }
+        
+        def t_change_goal(new_goal: str):
+            """Update the agent's goal."""
+            self.goal = new_goal
+            return {"ok": True, "new_goal": new_goal}
+        
+        def t_set_trading_mode(mode: str):
+            """Switch between MOCK and LIVE trading."""
+            mode = mode.upper()
+            if mode not in ("MOCK", "LIVE"):
+                return {"error": "mode must be MOCK or LIVE"}
+            # AgentLoop will pick this up
+            return {"ok": True, "mode": mode}
+        
+        def t_confirm_trade():
+            """Execute the pending trade (after risk approval)."""
+            return self.confirm_trade()
+        
+        # Register chat tools
+        reg.register("analyze_symbol", "Analyze a bStock symbol (RSI, MACD, EMA, volume, etc.).",
+                     {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}, t_analyze_symbol)
+        reg.register("get_portfolio", "Get current portfolio and risk status.",
+                     {"type": "object", "properties": {}}, t_get_portfolio)
+        reg.register("change_goal", "Update the agent's trading goal.",
+                     {"type": "object", "properties": {"new_goal": {"type": "string"}}, "required": ["new_goal"]}, t_change_goal)
+        reg.register("set_trading_mode", "Switch trading mode: MOCK or LIVE.",
+                     {"type": "object", "properties": {"mode": {"type": "string"}}, "required": ["mode"]}, t_set_trading_mode)
+        reg.register("confirm_trade", "Execute pending trade after risk approval.",
+                     {"type": "object", "properties": {}}, t_confirm_trade)
+        
+        # Also include universe discovery and quick scan
+        def t_discover_universe():
+            try:
+                symbols = discover_bstocks()
+                return {"symbols": symbols, "count": len(symbols)}
+            except Exception as e:
+                return {"error": str(e), "symbols": []}
+        reg.register("discover_universe", "Discover all tradeable bStock symbols on Binance.",
+                     {"type": "object", "properties": {}}, t_discover_universe)
+        
+        def t_quick_scan(min_volume_usd: float = 50000, max_symbols: int = 20):
+            try:
+                return {"candidates": quick_scan(min_volume_usd, max_symbols)}
+            except Exception as e:
+                return {"error": str(e), "candidates": []}
+        reg.register("quick_scan", "Quick volume-filtered scan of bStocks universe.",
+                     {"type": "object", "properties": {
+                         "min_volume_usd": {"type": "number", "default": 50000},
+                         "max_symbols": {"type": "integer", "default": 20}},
+                      "required": []}, t_quick_scan)
+        
+        # Web search tool
+        def t_web_search(query: str, max_results: int = 5):
+            """Search the web for news, docs, rules, etc. Use DuckDuckGo HTML."""
+            import httpx
+            from urllib.parse import quote_plus
+            try:
+                url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+                resp = httpx.get(url, timeout=10.0, headers={"User-Agent": "Mozilla/5.0"})
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(resp.text, "html.parser")
+                results = []
+                for r in soup.select(".result__snippet, .web-result-description, .snippet"):
+                    txt = r.get_text(strip=True)
+                    if txt and len(txt) > 20:
+                        results.append(txt[:300])
+                        if len(results) >= max_results:
+                            break
+                return {"query": query, "results": results}
+            except Exception as e:
+                return {"error": str(e), "results": []}
+        reg.register("web_search", "Search the web (DuckDuckGo) for news, docs, rules.",
+                     {"type": "object", "properties": {
+                         "query": {"type": "string"}, "max_results": {"type": "integer", "default": 5}},
+                      "required": ["query"]}, t_web_search)
+        
+        # Build messages
+        from ..prompts import SYSTEM
+        messages = [
+            {"role": "system", "content": SYSTEM + "\n\nYou are also a chat assistant. Use tools to answer user questions about bStocks, portfolio, market data, etc. Be concise."},
+            {"role": "user", "content": text},
+        ]
+        
+        result = chat_with_tools(messages, registry, trace, response_json=False)
+        
+        # Extract text response
+        content = result.get("content", "")
+        if not content:
+            return "Sorry, I couldn't process that."
+        
+        trace.save()
+        return content
+
     # ---- trade execution (gated) -------------------------------------
     def confirm_trade(self) -> dict:
         """User-confirmed execution path: risk re-check -> baw order -> verify."""
