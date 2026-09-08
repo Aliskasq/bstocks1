@@ -268,20 +268,26 @@ function renderWatch(ws){
 }
 
 async function refresh(){
-  const s = await (await fetch('/api/state')).json();
-  $('#st').textContent = s.running ? (s.status||'running') : 'idle';
-  $('#st').className = 'badge ' + (s.running?'on':'off');
-  $('#cyc').textContent = 'cycles ' + s.cycles;
-  $('#src').textContent = s.data_source === 'mock' ? 'MOCK DATA' : 'Binance REST';
-  $('#src').className = 'badge ' + (s.data_source==='mock'?'warn':'on');
-  $('#auth').textContent = s.authenticated ? 'baw wallet connected' : 'wallet not connected';
-  $('#auth').className = 'badge ' + (s.authenticated?'on':'warn');
-  if(s.address) $('#auth').textContent += ' · ' + s.address.slice(0,6) + '…' + s.address.slice(-4);
-  if(s.model){ $('#mnow').textContent = s.model; }
-  if(s.trading_mode){ updateModeBadge(s.trading_mode); }
-  renderRisk(s); renderWatch(s.watches);
-  if(s.movers) renderMovers(s.movers);
-  if(s.last_decision) renderDecision(s.last_decision, null);
+  try {
+    const s = await (await fetch('/api/state')).json();
+    $('#st').textContent = s.running ? (s.status||'running') : 'idle';
+    $('#st').className = 'badge ' + (s.running?'on':'off');
+    $('#cyc').textContent = 'cycles ' + s.cycles;
+    $('#src').textContent = s.data_source === 'mock' ? 'MOCK DATA' : 'Binance REST';
+    $('#src').className = 'badge ' + (s.data_source==='mock'?'warn':'on');
+    $('#auth').textContent = s.authenticated ? 'baw wallet connected' : 'wallet not connected';
+    $('#auth').className = 'badge ' + (s.authenticated?'on':'warn');
+    if(s.address) $('#auth').textContent += ' · ' + s.address.slice(0,6) + '…' + s.address.slice(-4);
+    if(s.model){ $('#mnow').textContent = s.model; }
+    if(s.trading_mode){ updateModeBadge(s.trading_mode); }
+    renderRisk(s); renderWatch(s.watches);
+    if(s.movers) renderMovers(s.movers);
+    if(s.last_decision) renderDecision(s.last_decision, null);
+  } catch(e) {
+    console.error('refresh error:', e);
+    $('#st').textContent = 'error';
+    $('#st').className = 'badge off';
+  }
 }
 
 async function loadModels(refreshList){
