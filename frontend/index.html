@@ -376,7 +376,8 @@ async function refreshChat(){
   try {
     const r = await (await fetch('/api/chat_history')).json();
     $('#chatMsgs').innerHTML = '';
-    for (const ev of r.history) {
+    const history = r.history.slice(-30); // Show last 30 messages only
+    for (const ev of history) {
       if (ev.kind === 'chat_user') addChatMsg('user', ev.text, false);
       else if (ev.kind === 'chat_agent') addChatMsg('agent', ev.text, false);
       else if (ev.kind === 'chat_tool_call') addChatToolCall(ev.tool, ev.args);
